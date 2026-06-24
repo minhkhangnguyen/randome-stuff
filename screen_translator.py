@@ -24,7 +24,7 @@ TESSDATA_DIR = Path(os.environ.get("TESSDATA_DIR", str(BASE_DIR / "tessdata")))
 TARGET_LANG = os.environ.get("TARGET_LANG", "vi")
 # Tesseract languages. Use chi_sim for simplified Chinese, chi_tra for traditional Chinese, jpn for Japanese.
 OCR_LANG = os.environ.get("OCR_LANG", "chi_sim+chi_tra+jpn+eng")
-CAPTURE_INTERVAL_MS = int(os.environ.get("CAPTURE_INTERVAL_MS", "1200"))
+CAPTURE_INTERVAL_MS = int(os.environ.get("CAPTURE_INTERVAL_MS", "300"))
 MIN_TEXT_CHARS = int(os.environ.get("MIN_TEXT_CHARS", "2"))
 SCREEN_HISTORY_WORDS = int(os.environ.get("SCREEN_HISTORY_WORDS", "300"))
 
@@ -335,7 +335,13 @@ def main():
 
     def start(region):
         overlay.show()
-        overlay.move(region.left, max(0, region.top - 230))
+        # Put translated text at the top-center of the main screen so it does
+        # not cover the selected subtitle/movie area.
+        screen_geometry = QApplication.primaryScreen().availableGeometry()
+        overlay.move(
+            screen_geometry.x() + max(0, (screen_geometry.width() - overlay.width()) // 2),
+            screen_geometry.y(),
+        )
         state["translator"] = ScreenTranslator(region, overlay)
 
     selector.region_selected.connect(start)
