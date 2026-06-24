@@ -9,7 +9,7 @@ from faster_whisper import WhisperModel
 import argostranslate.package
 import argostranslate.translate
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt5.QtCore import Qt, pyqtSignal, QObject
 from PyQt5.QtGui import QFont
 
 # ===================== CONFIG =====================
@@ -17,7 +17,7 @@ SOURCE_LANG = "zh"
 TARGET_LANG = "vi"
 WHISPER_MODEL = "tiny"
 SAMPLE_RATE = 16000
-MIN_AUDIO_SECONDS = 1.0
+MIN_AUDIO_SECONDS = 1.2
 
 def ensure_translation_package(source_lang, target_lang):
     try:
@@ -61,7 +61,7 @@ class AudioTranslator(QObject):
         ensure_translation_package(source_lang, TARGET_LANG)
         
         self.model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-        self.buffer = deque(maxlen=int(SAMPLE_RATE * 10))
+        self.buffer = deque(maxlen=int(SAMPLE_RATE * 12))
 
     def audio_callback(self, indata, frames, time_info, status):
         self.buffer.extend(indata[:, 0])
@@ -70,22 +70,40 @@ class AudioTranslator(QObject):
         def loop():
             min_samples = int(SAMPLE_RATE * MIN_AUDIO_SECONDS)
             
-            # Use WASAPI loopback (captures system audio even if speakers are muted)
+            # Try to find WASAPI loopback device (system audio)
+            devices = sd.query_devices()
+            loopback_device = None
+            
+            for i, device in enumerate(devices):
+                if device['max_input_channels'] > 0 and 'loopback' in device['name'].lower():
+                    loopback_device = i
+                    break
+            
+            # If no loopback device found, use default output device as input
+            if loopback_device is None:
+                try:
+                    default_output = sd.default.device[1]
+                    if default_output is not None:
+                        loopback_device = default_output
+                except:
+                    loopback_device = None
+
+            print(f"🎙️ Using audio device: {loopback_device}")
+
             try:
                 with sd.InputStream(
                     samplerate=SAMPLE_RATE,
                     channels=1,
                     callback=self.audio_callback,
                     blocksize=int(SAMPLE_RATE * 0.1),
-                    device=None,           # Use default
+                    device=loopback_device,
                     dtype='float32'
                 ):
-                    print("🎙️ Capturing system audio (works even when muted)")
                     while True:
                         if len(self.buffer) >= min_samples:
                             audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
                             
-                            if np.max(np.abs(audio)) > 0.005:
+                            if np.max(np.abs(audio)) > 0.003:
                                 segments, _ = self.model.transcribe(
                                     audio, 
                                     language=self.source_lang,
@@ -100,7 +118,7 @@ class AudioTranslator(QObject):
                         
                         time.sleep(0.25)
             except Exception as e:
-                print(f"Audio error: {e}")
+                print(f"Audio capture error: {e}")
                 
         threading.Thread(target=loop, daemon=True).start()
 
@@ -111,7 +129,7 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setGeometry(100, 100, 650, 140)
 
-        self.label = QLabel("Ready - Capturing system audio (even when muted)")
+        self.label = QLabel("Ready - Capturing system audio")
         self.label.setFont(QFont("Segoe UI", 14))
         self.label.setStyleSheet("color: #00ffcc; background-color: rgba(0,0,0,200); padding: 15px; border-radius: 8px;")
         self.label.setAlignment(Qt.AlignCenter)
@@ -134,7 +152,7 @@ def main():
     audio.translation_ready.connect(overlay.show_translation)
     audio.start()
 
-    print("✅ Translator running (System audio capture enabled)")
+    print("✅ Translator running (System audio mode)")
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
