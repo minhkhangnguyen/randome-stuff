@@ -7,3 +7,5 @@ soundcard
 pillow
 numpy
 deep-translator
+google-cloud-speech
+google-cloud-translate

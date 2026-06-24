@@ -1,5 +1,6 @@
 import sys
 import os
+import html
 import re
 import threading
 import time
@@ -26,6 +27,14 @@ try:
     from deep_translator import GoogleTranslator
 except Exception:
     GoogleTranslator = None
+try:
+    from google.cloud import speech
+except Exception:
+    speech = None
+try:
+    from google.cloud import translate_v2 as google_translate_v2
+except Exception:
+    google_translate_v2 = None
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout
 from PyQt5.QtCore import Qt, pyqtSignal, QObject
 from PyQt5.QtGui import QFont
@@ -36,12 +45,16 @@ SOURCE_LANG = os.environ.get("SOURCE_LANG", "zh")
 TARGET_LANG = os.environ.get("TARGET_LANG", "vi")
 # google = online Google Translate, argos/local = offline Argos Translate
 TRANSLATOR = os.environ.get("TRANSLATOR", "google").lower()
+# whisper = local faster-whisper, google = Google Cloud Speech-to-Text
+SPEECH_ENGINE = os.environ.get("SPEECH_ENGINE", "whisper").lower()
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 SAMPLE_RATE = 16000
 MIN_AUDIO_SECONDS = 1.0
 SILENCE_THRESHOLD = 0.005
 SENTENCE_ENDINGS = ".!?…。！？"
 GOOGLE_LANG_CODES = {"zh": "zh-CN", "ja": "ja", "vi": "vi", "en": "en"}
+GOOGLE_SPEECH_LANG_CODES = {"zh": "zh-CN", "ja": "ja-JP", "vi": "vi-VN", "en": "en-US"}
+GOOGLE_TRANSLATE_CLIENT = None
 
 
 def clean_subtitle_text(text):
@@ -126,6 +139,30 @@ def translate_with_google(text, source_lang, target_lang):
     return GoogleTranslator(source=google_source, target=google_target).translate(text)
 
 
+def translate_with_google_cloud(text, source_lang, target_lang):
+    """Use official Google Cloud Translation API. Requires GOOGLE_APPLICATION_CREDENTIALS."""
+    global GOOGLE_TRANSLATE_CLIENT
+    if google_translate_v2 is None:
+        raise RuntimeError(
+            "google-cloud-translate is not installed. Run pip install -r requirements.txt"
+        )
+    if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        raise RuntimeError(
+            "Google Cloud Translation needs a Google Cloud service account key. "
+            "Set GOOGLE_APPLICATION_CREDENTIALS to the JSON key file path."
+        )
+    if GOOGLE_TRANSLATE_CLIENT is None:
+        GOOGLE_TRANSLATE_CLIENT = google_translate_v2.Client()
+
+    result = GOOGLE_TRANSLATE_CLIENT.translate(
+        text,
+        source_language=GOOGLE_LANG_CODES.get(source_lang, source_lang),
+        target_language=GOOGLE_LANG_CODES.get(target_lang, target_lang),
+        format_="text",
+    )
+    return html.unescape(result.get("translatedText", "")).strip()
+
+
 def translate_with_argos(text, source_lang, target_lang):
     try:
         return argostranslate.translate.translate(text, source_lang, target_lang)
@@ -137,6 +174,12 @@ def translate_with_argos(text, source_lang, target_lang):
 def translate_text(text, source_lang, target_lang):
     if not text.strip():
         return ""
+
+    if TRANSLATOR in {"google_cloud", "googlecloud", "cloud_translate"}:
+        try:
+            return translate_with_google_cloud(text, source_lang, target_lang)
+        except Exception as e:
+            print(f"⚠️ Google Cloud Translation failed, trying local Argos fallback: {e}")
 
     if TRANSLATOR in {"google", "googletranslate", "google_translate"}:
         try:
@@ -150,6 +193,45 @@ def translate_text(text, source_lang, target_lang):
         print(f"⚠️ Local translation failed: {e}")
         return text
 
+
+def load_google_speech_client():
+    """Load Google Cloud Speech-to-Text client. Requires GOOGLE_APPLICATION_CREDENTIALS."""
+    if speech is None:
+        raise RuntimeError(
+            "google-cloud-speech is not installed. Run pip install -r requirements.txt"
+        )
+    if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        raise RuntimeError(
+            "Google Speech-to-Text needs a Google Cloud service account key. "
+            "Set GOOGLE_APPLICATION_CREDENTIALS to the JSON key file path."
+        )
+    return speech.SpeechClient()
+
+
+def google_recognize_audio(client, audio, source_lang):
+    """Send a short audio block to Google Speech-to-Text."""
+    if audio.size == 0:
+        return ""
+
+    # Convert float32 -1..1 mono audio to 16-bit PCM LINEAR16.
+    audio = np.clip(audio, -1.0, 1.0)
+    pcm16 = (audio * 32767).astype(np.int16).tobytes()
+
+    config = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+        sample_rate_hertz=SAMPLE_RATE,
+        language_code=GOOGLE_SPEECH_LANG_CODES.get(source_lang, source_lang),
+        enable_automatic_punctuation=True,
+        model="latest_long",
+    )
+    recognition_audio = speech.RecognitionAudio(content=pcm16)
+    response = client.recognize(config=config, audio=recognition_audio)
+
+    return " ".join(
+        result.alternatives[0].transcript.strip()
+        for result in response.results
+        if result.alternatives
+    ).strip()
 
 def load_whisper_model():
     """Download/load Whisper safely on Windows without requiring admin symlink rights."""
@@ -185,7 +267,13 @@ class AudioTranslator(QObject):
 
         if TRANSLATOR in {"argos", "local", "offline"}:
             ensure_translation_package(source_lang, TARGET_LANG)
-        self.model = load_whisper_model()
+
+        self.model = None
+        self.speech_client = None
+        if SPEECH_ENGINE in {"google", "google_speech", "googlecloud"}:
+            self.speech_client = load_google_speech_client()
+        else:
+            self.model = load_whisper_model()
 
     def start(self):
         def record_loop():
@@ -232,17 +320,22 @@ class AudioTranslator(QObject):
                 if audio is not None:
                     if np.max(np.abs(audio)) > SILENCE_THRESHOLD:
                         try:
-                            initial_prompt = " ".join(self.text_history) or None
-                            segments, _ = self.model.transcribe(
-                                audio,
-                                language=self.source_lang,
-                                beam_size=2,
-                                vad_filter=True,
-                                initial_prompt=initial_prompt,
-                            )
-                            current_text = " ".join(s.text.strip() for s in segments).strip()
+                            if self.speech_client is not None:
+                                current_text = google_recognize_audio(
+                                    self.speech_client, audio, self.source_lang
+                                )
+                            else:
+                                initial_prompt = " ".join(self.text_history) or None
+                                segments, _ = self.model.transcribe(
+                                    audio,
+                                    language=self.source_lang,
+                                    beam_size=2,
+                                    vad_filter=True,
+                                    initial_prompt=initial_prompt,
+                                )
+                                current_text = " ".join(s.text.strip() for s in segments).strip()
                         except Exception as e:
-                            message = f"❌ Whisper transcription failed: {e}"
+                            message = f"❌ Speech recognition failed: {e}"
                             print(message)
                             self.translation_ready.emit(message)
                             current_text = ""
@@ -326,7 +419,7 @@ def main():
         audio = AudioTranslator(source_lang)
         audio.translation_ready.connect(overlay.show_translation)
         audio.start()
-        print(f"✅ Translator running ({source_lang} → {TARGET_LANG}, translator={TRANSLATOR})")
+        print(f"✅ Translator running ({source_lang} → {TARGET_LANG}, speech={SPEECH_ENGINE}, translator={TRANSLATOR})")
     except Exception as e:
         message = f"❌ Translator startup failed: {e}"
         print(message)
