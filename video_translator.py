@@ -74,54 +74,58 @@ class AudioTranslator(QObject):
         def loop():
             min_samples = int(SAMPLE_RATE * MIN_AUDIO_SECONDS)
             
-            # Try to find a loopback device first
             devices = sd.query_devices()
-            loopback_device = None
+            device_id = None
             
+            # Try to find loopback device
             for i, dev in enumerate(devices):
                 if dev['max_input_channels'] > 0 and ('loopback' in dev['name'].lower() or 'stereo mix' in dev['name'].lower()):
-                    loopback_device = i
+                    device_id = i
                     break
-
-            # Fallback: use default output device with 2 channels
-            if loopback_device is None:
+            
+            # Fallback to default output device
+            if device_id is None:
                 try:
-                    loopback_device = sd.default.device[1]
+                    device_id = sd.default.device[1]
                 except:
-                    loopback_device = None
+                    device_id = None
 
-            print(f"🎙️ Using audio device: {loopback_device}")
+            print(f"🎙️ Trying audio device: {device_id}")
 
-            try:
-                # Force 2 channels (most common for system audio)
-                with sd.InputStream(
-                    samplerate=SAMPLE_RATE,
-                    channels=2,                    # ← Force stereo
-                    callback=self.audio_callback,
-                    blocksize=int(SAMPLE_RATE * 0.1),
-                    device=loopback_device,
-                    dtype='float32'
-                ):
-                    while True:
-                        if len(self.buffer) >= min_samples:
-                            audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
-                            
-                            if np.max(np.abs(audio)) > 0.003:
-                                segments, _ = self.model.transcribe(
-                                    audio, 
-                                    language=self.source_lang,
-                                    beam_size=1,
-                                    vad_filter=True
-                                )
-                                text = " ".join([s.text for s in segments]).strip()
+            # Try different channel counts
+            for channels in [2, 1, 4, 6]:
+                try:
+                    with sd.InputStream(
+                        samplerate=SAMPLE_RATE,
+                        channels=channels,
+                        callback=self.audio_callback,
+                        blocksize=int(SAMPLE_RATE * 0.1),
+                        device=device_id,
+                        dtype='float32'
+                    ):
+                        print(f"✅ Successfully opened with {channels} channels")
+                        while True:
+                            if len(self.buffer) >= min_samples:
+                                audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
                                 
-                                if text and len(text) > 1:
-                                    translated = translate_text(text, self.source_lang, TARGET_LANG)
-                                    self.translation_ready.emit(f"🎙️ {translated}")
-                        
-                        time.sleep(0.25)
-            except Exception as e:
-                print(f"Audio capture error: {e}")
+                                if np.max(np.abs(audio)) > 0.003:
+                                    segments, _ = self.model.transcribe(
+                                        audio, 
+                                        language=self.source_lang,
+                                        beam_size=1,
+                                        vad_filter=True
+                                    )
+                                    text = " ".join([s.text for s in segments]).strip()
+                                    
+                                    if text and len(text) > 1:
+                                        translated = translate_text(text, self.source_lang, TARGET_LANG)
+                                        self.translation_ready.emit(f"🎙️ {translated}")
+                            
+                            time.sleep(0.25)
+                except Exception as e:
+                    continue  # Try next channel count
+            
+            print("❌ Could not open any audio device")
                 
         threading.Thread(target=loop, daemon=True).start()
 
