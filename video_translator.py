@@ -75,35 +75,33 @@ class AudioTranslator(QObject):
             min_samples = int(SAMPLE_RATE * MIN_AUDIO_SECONDS)
             
             devices = sd.query_devices()
-            device_id = None
+            wasapi_devices = []
             
-            # Try to find loopback device
+            # Find WASAPI devices
             for i, dev in enumerate(devices):
-                if dev['max_input_channels'] > 0 and ('loopback' in dev['name'].lower() or 'stereo mix' in dev['name'].lower()):
-                    device_id = i
-                    break
+                if dev['hostapi'] == 3 and dev['max_input_channels'] > 0:  # WASAPI = 3
+                    wasapi_devices.append((i, dev))
             
-            # Fallback to default output device
-            if device_id is None:
+            print(f"Found {len(wasapi_devices)} WASAPI devices")
+            
+            success = False
+            
+            for device_id, dev in wasapi_devices:
                 try:
-                    device_id = sd.default.device[1]
-                except:
-                    device_id = None
-
-            print(f"🎙️ Trying audio device: {device_id}")
-
-            # Try different channel counts
-            for channels in [2, 1, 4, 6]:
-                try:
+                    print(f"Trying WASAPI device {device_id}: {dev['name']}")
+                    
                     with sd.InputStream(
                         samplerate=SAMPLE_RATE,
-                        channels=channels,
+                        channels=2,
                         callback=self.audio_callback,
                         blocksize=int(SAMPLE_RATE * 0.1),
                         device=device_id,
-                        dtype='float32'
+                        dtype='float32',
+                        extra_settings=sd.WasapiSettings(loopback=True)
                     ):
-                        print(f"✅ Successfully opened with {channels} channels")
+                        print(f"✅ SUCCESS with device {device_id}")
+                        success = True
+                        
                         while True:
                             if len(self.buffer) >= min_samples:
                                 audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
@@ -122,10 +120,14 @@ class AudioTranslator(QObject):
                                         self.translation_ready.emit(f"🎙️ {translated}")
                             
                             time.sleep(0.25)
+                            
                 except Exception as e:
-                    continue  # Try next channel count
+                    print(f"Failed on device {device_id}: {e}")
+                    continue
             
-            print("❌ Could not open any audio device")
+            if not success:
+                print("❌ Could not open any WASAPI loopback device")
+                print("Tip: Try enabling 'Stereo Mix' in Windows Sound settings")
                 
         threading.Thread(target=loop, daemon=True).start()
 
@@ -136,7 +138,7 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setGeometry(100, 100, 650, 140)
 
-        self.label = QLabel("Ready - Capturing system audio")
+        self.label = QLabel("Ready - Capturing system audio (WASAPI)")
         self.label.setFont(QFont("Segoe UI", 14))
         self.label.setStyleSheet("color: #00ffcc; background-color: rgba(0,0,0,200); padding: 15px; border-radius: 8px;")
         self.label.setAlignment(Qt.AlignCenter)
@@ -159,7 +161,7 @@ def main():
     audio.translation_ready.connect(overlay.show_translation)
     audio.start()
 
-    print("✅ Translator running (System audio mode)")
+    print("✅ Translator running (WASAPI Loopback mode)")
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
