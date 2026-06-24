@@ -87,29 +87,17 @@ class AudioTranslator(QObject):
             # Find candidate devices
             candidate_devices = []
             
-            # 1. WASAPI loopback (default output device)
-            try:
-                hostapis = sd.query_hostapis()
-                for i, api in enumerate(hostapis):
-                    if 'WASAPI' in api['name']:
-                        default_out = api['default_output_device']
-                        if default_out >= 0:
-                            candidate_devices.append(('wasapi_loopback', default_out))
-                        break
-            except:
-                pass
-                
-            # 2. Stereo Mix
+            # 1. Stereo Mix
             for i, dev in enumerate(devices):
                 if dev['max_input_channels'] > 0 and 'stereo mix' in dev['name'].lower():
                     candidate_devices.append(('input', i))
                     
-            # 3. Any input device with "input" in name
+            # 2. Any input device with "input" in name
             for i, dev in enumerate(devices):
                 if dev['max_input_channels'] > 0 and 'input' in dev['name'].lower():
                     candidate_devices.append(('input', i))
                     
-            # 4. Default input device
+            # 3. Default input device
             try:
                 candidate_devices.append(('input', sd.default.device[0]))
             except:
@@ -134,12 +122,8 @@ class AudioTranslator(QObject):
                 print(f"🎙️ Trying device {working_device}: {devices[working_device]['name']} ({dev_type})")
                 
                 # Fetch device max channels
-                if dev_type == 'wasapi_loopback':
-                    max_ch = devices[working_device]['max_output_channels']
-                    ch_options = [max_ch, 2, 1] if max_ch > 0 else [2, 1]
-                else:
-                    max_ch = devices[working_device]['max_input_channels']
-                    ch_options = [max_ch, 2, 1] if max_ch > 0 else [2, 1]
+                max_ch = devices[working_device]['max_input_channels']
+                ch_options = [max_ch, 2, 1] if max_ch > 0 else [2, 1]
                     
                 # Remove duplicates and preserve order
                 ch_options = list(dict.fromkeys(ch_options))
@@ -154,20 +138,13 @@ class AudioTranslator(QObject):
                     for ch in ch_options:
                         if stream_opened: break
                         try:
-                            extra_settings = None
-                            if dev_type == 'wasapi_loopback' and hasattr(sd, 'WasapiSettings'):
-                                extra_settings = sd.WasapiSettings(exclusive=False, loopback=True)
-                            elif dev_type == 'wasapi_loopback':
-                                continue # Cannot use WASAPI loopback without WasapiSettings
-                                
                             with sd.InputStream(
                                 samplerate=sr,
                                 channels=ch,
                                 callback=self.audio_callback,
                                 blocksize=int(sr * 0.1),
                                 device=working_device,
-                                dtype='float32',
-                                extra_settings=extra_settings
+                                dtype='float32'
                             ):
                                 self.current_sr = sr
                                 print(f"✅ Successfully opened with {ch} channels at {sr}Hz")
