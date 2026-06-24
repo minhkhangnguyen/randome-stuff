@@ -14,9 +14,9 @@ from PyQt5.QtGui import QFont
 # ===================== CONFIG =====================
 SOURCE_LANG = "zh"
 TARGET_LANG = "vi"
-WHISPER_MODEL = "tiny"
+WHISPER_MODEL = "base"  # Changed from tiny to base for better accuracy
 SAMPLE_RATE = 16000
-MIN_AUDIO_SECONDS = 1.2
+MIN_AUDIO_SECONDS = 2.5  # Increased from 1.2s to 2.5s for better sentence context
 
 def ensure_translation_package(source_lang, target_lang):
     try:
@@ -59,8 +59,10 @@ class AudioTranslator(QObject):
         self.source_lang = source_lang
         ensure_translation_package(source_lang, TARGET_LANG)
         
-        self.model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-        self.buffer = deque(maxlen=int(SAMPLE_RATE * 12))
+        # Use device="auto" to automatically use Nvidia GPU (CUDA) if available (50x faster)
+        # compute_type="default" will auto-select int8 for CPU or float16 for GPU
+        self.model = WhisperModel(WHISPER_MODEL, device="auto", compute_type="default")
+        self.buffer = deque(maxlen=int(SAMPLE_RATE * 5)) # Keep last 5 seconds of audio
 
     def start(self):
         def record_loop():
@@ -90,13 +92,14 @@ class AudioTranslator(QObject):
             min_samples = int(SAMPLE_RATE * MIN_AUDIO_SECONDS)
             while True:
                 if len(self.buffer) >= min_samples:
-                    audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
+                    # Grab everything in the buffer (up to 5 seconds) for maximum context
+                    audio = np.array(list(self.buffer), dtype=np.float32)
                     
                     if np.max(np.abs(audio)) > 0.003:
                         segments, _ = self.model.transcribe(
                             audio, 
                             language=self.source_lang,
-                            beam_size=1,
+                            beam_size=2, # Increased beam size for slightly better accuracy
                             vad_filter=True
                         )
                         text = " ".join([s.text for s in segments]).strip()
@@ -105,7 +108,8 @@ class AudioTranslator(QObject):
                             translated = translate_text(text, self.source_lang, TARGET_LANG)
                             self.translation_ready.emit(f"🎙️ {translated}")
                 
-                time.sleep(0.25)
+                # Sleep slightly longer (0.5s instead of 0.25s) to save CPU since we process larger chunks
+                time.sleep(0.5)
 
         try:
             # Start background thread to pull audio seamlessly
