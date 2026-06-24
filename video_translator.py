@@ -65,16 +65,14 @@ class AudioTranslator(QObject):
     def start(self):
         def record_loop():
             # Import soundcard inside the background thread!
-            # This prevents soundcard from initializing COM in MTA mode on the main thread,
-            # which otherwise causes PyQt5 (which requires STA mode) to crash with RPC_E_CHANGED_MODE.
             import soundcard as sc
             try:
                 speaker = sc.default_speaker()
-                mic = speaker.recorder(samplerate=SAMPLE_RATE)
+                mic = sc.get_microphone(id=str(speaker.name), include_loopback=True)
                 print(f"✅ Successfully opened WASAPI Loopback on: {speaker.name}")
-                with mic:
+                with mic.recorder(samplerate=SAMPLE_RATE) as recorder:
                     while True:
-                        data = mic.record(numframes=int(SAMPLE_RATE * 0.1))
+                        data = recorder.record(numframes=int(SAMPLE_RATE * 0.1))
                         if len(data.shape) > 1 and data.shape[1] > 1:
                             mono = np.mean(data, axis=1)
                         else:
