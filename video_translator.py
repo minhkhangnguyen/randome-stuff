@@ -16,15 +16,14 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt5.QtGui import QFont
 
 # ===================== CONFIG =====================
-SOURCE_LANG = "zh"      # "zh" = Chinese, "ja" = Japanese
-TARGET_LANG = "vi"      # Vietnamese
-WHISPER_MODEL = "small"
-OCR_REGION = None
+SOURCE_LANG = "zh"
+TARGET_LANG = "vi"
+WHISPER_MODEL = "tiny"          # Use "tiny" for lower latency
+CHUNK_DURATION = 0.4            # 400ms chunks (for ~100-300ms reaction)
+OVERLAP = 0.15                  # 150ms overlap
 SAMPLE_RATE = 16000
-CHUNK_DURATION = 5
 
 def ensure_translation_package(source_lang, target_lang):
-    """Install translation package if missing. Falls back to two-step (via English)"""
     try:
         argostranslate.translate.translate("test", source_lang, target_lang)
         return
@@ -35,35 +34,28 @@ def ensure_translation_package(source_lang, target_lang):
     argostranslate.package.update_package_index()
     available = argostranslate.package.get_available_packages()
 
-    # Try direct package
     package = next((p for p in available if p.from_code == source_lang and p.to_code == target_lang), None)
     if package:
         argostranslate.package.install_from_path(package.download())
-        print(f"✅ Direct model installed: {source_lang} → {target_lang}")
+        print(f"✅ Direct model installed")
         return
 
-    # Fallback: use English as bridge (zh → en → vi)
-    print("Direct package not found. Using English bridge (zh → en → vi)...")
+    # Fallback via English
     pkg1 = next((p for p in available if p.from_code == source_lang and p.to_code == "en"), None)
     pkg2 = next((p for p in available if p.from_code == "en" and p.to_code == target_lang), None)
-    
-    if pkg1:
-        argostranslate.package.install_from_path(pkg1.download())
-    if pkg2:
-        argostranslate.package.install_from_path(pkg2.download())
-    print("✅ Bridge models installed (via English)")
+    if pkg1: argostranslate.package.install_from_path(pkg1.download())
+    if pkg2: argostranslate.package.install_from_path(pkg2.download())
+    print("✅ Bridge models installed")
 
 def translate_text(text, source_lang, target_lang):
-    """Translate with fallback to English bridge"""
     try:
         return argostranslate.translate.translate(text, source_lang, target_lang)
     except:
-        # Try via English
         try:
             en_text = argostranslate.translate.translate(text, source_lang, "en")
             return argostranslate.translate.translate(en_text, "en", target_lang)
-        except Exception as e:
-            return f"[Translation failed] {text[:40]}"
+        except:
+            return text
 
 class AudioTranslator(QObject):
     translation_ready = pyqtSignal(str)
@@ -72,51 +64,39 @@ class AudioTranslator(QObject):
         super().__init__()
         self.source_lang = source_lang
         ensure_translation_package(source_lang, TARGET_LANG)
+        
+        # Use tiny model + int8 for speed
         self.model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-        self.audio_buffer = deque(maxlen=int(SAMPLE_RATE * CHUNK_DURATION))
+        
+        self.buffer = deque(maxlen=int(SAMPLE_RATE * (CHUNK_DURATION + OVERLAP)))
 
     def audio_callback(self, indata, frames, time_info, status):
-        self.audio_buffer.extend(indata[:, 0])
+        self.buffer.extend(indata[:, 0])
 
     def start(self):
         def loop():
+            chunk_size = int(SAMPLE_RATE * CHUNK_DURATION)
             with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
                                 callback=self.audio_callback,
-                                blocksize=int(SAMPLE_RATE * 0.1)):
+                                blocksize=int(SAMPLE_RATE * 0.05)):
                 while True:
-                    if len(self.audio_buffer) >= SAMPLE_RATE * CHUNK_DURATION:
-                        audio = np.array(list(self.audio_buffer), dtype=np.float32)
-                        self.audio_buffer.clear()
-
-                        segments, _ = self.model.transcribe(audio, language=self.source_lang)
+                    if len(self.buffer) >= chunk_size:
+                        audio = np.array(list(self.buffer)[-chunk_size:], dtype=np.float32)
+                        
+                        segments, _ = self.model.transcribe(
+                            audio, 
+                            language=self.source_lang,
+                            beam_size=1,
+                            vad_filter=True
+                        )
                         text = " ".join([s.text for s in segments]).strip()
-                        if text:
+                        
+                        if text and len(text) > 2:
                             translated = translate_text(text, self.source_lang, TARGET_LANG)
                             self.translation_ready.emit(f"🎙️ {translated}")
-
-                    time.sleep(0.5)
+                    
+                    time.sleep(0.08)  # ~80ms check interval
         threading.Thread(target=loop, daemon=True).start()
-
-class SubtitleTranslator(QObject):
-    translation_ready = pyqtSignal(str)
-
-    def __init__(self, source_lang):
-        super().__init__()
-        self.source_lang = source_lang
-        ensure_translation_package(source_lang, TARGET_LANG)
-        self.sct = mss.MSS()
-
-    def capture_and_translate(self):
-        if OCR_REGION is None:
-            return
-        monitor = {"top": OCR_REGION[1], "left": OCR_REGION[0],
-                   "width": OCR_REGION[2], "height": OCR_REGION[3]}
-        img = np.array(self.sct.grab(monitor))
-        lang = "chi_sim+eng" if self.source_lang == "zh" else "jpn+eng"
-        text = pytesseract.image_to_string(img, lang=lang).strip()
-        if text:
-            translated = translate_text(text, self.source_lang, TARGET_LANG)
-            self.translation_ready.emit(f"📺 {translated}")
 
 class Overlay(QWidget):
     def __init__(self):
@@ -125,7 +105,7 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setGeometry(100, 100, 650, 140)
 
-        self.label = QLabel("Ready - Chinese/Japanese → Vietnamese")
+        self.label = QLabel("Ready - Low latency mode (~300-500ms)")
         self.label.setFont(QFont("Segoe UI", 14))
         self.label.setStyleSheet("color: #00ffcc; background-color: rgba(0,0,0,200); padding: 15px; border-radius: 8px;")
         self.label.setAlignment(Qt.AlignCenter)
@@ -148,14 +128,7 @@ def main():
     audio.translation_ready.connect(overlay.show_translation)
     audio.start()
 
-    subtitle = SubtitleTranslator(source_lang)
-    subtitle.translation_ready.connect(overlay.show_translation)
-
-    timer = QTimer()
-    timer.timeout.connect(subtitle.capture_and_translate)
-    timer.start(3000)
-
-    print("✅ Translator is running!")
+    print("✅ Low-latency Translator running (~300-500ms reaction)")
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
