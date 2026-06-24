@@ -27,6 +27,7 @@ OCR_LANG = os.environ.get("OCR_LANG", "chi_sim+chi_tra+jpn+eng")
 CAPTURE_INTERVAL_MS = int(os.environ.get("CAPTURE_INTERVAL_MS", "300"))
 MIN_TEXT_CHARS = int(os.environ.get("MIN_TEXT_CHARS", "2"))
 SCREEN_HISTORY_WORDS = int(os.environ.get("SCREEN_HISTORY_WORDS", "300"))
+SCREEN_MAX_LINES = int(os.environ.get("SCREEN_MAX_LINES", "5"))
 
 
 COMMON_TESSERACT_PATHS = [
@@ -99,6 +100,17 @@ def preprocess_for_ocr(img: Image.Image) -> Image.Image:
     return img
 
 
+
+
+def one_line(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def format_history_for_overlay(lines):
+    # Keep the 300-word pending buffer internally, but show only the newest
+    # few logical lines so the overlay does not cover the movie.
+    display_lines = [one_line(line) for line in lines if one_line(line)]
+    return "\n".join(display_lines[-SCREEN_MAX_LINES:])
 
 def count_words(text):
     # Vietnamese/English use spaces. For CJK text without spaces this still
@@ -217,6 +229,7 @@ class Overlay(QWidget):
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setWordWrap(True)
         self.label.setFixedWidth(1000)
+        self.label.setMaximumHeight(230)
 
         layout = QVBoxLayout()
         layout.addWidget(self.label)
@@ -314,7 +327,8 @@ class ScreenTranslator(QObject):
 
         visible_lines = trim_to_word_limit(self.translated_history, SCREEN_HISTORY_WORDS)
         self.translated_history = visible_lines
-        self.overlay.show_text("🖼️ " + "\n\n".join(visible_lines))
+        display_text = format_history_for_overlay(visible_lines)
+        self.overlay.show_text("🖼️ " + display_text)
 
     def on_error(self, message):
         self.overlay.show_text(
