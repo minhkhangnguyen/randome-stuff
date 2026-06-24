@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -33,6 +34,35 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 SAMPLE_RATE = 16000
 MIN_AUDIO_SECONDS = 1.0
 SILENCE_THRESHOLD = 0.005
+SENTENCE_ENDINGS = ".!?…。！？"
+
+
+def clean_subtitle_text(text):
+    """Make subtitle text easier to read on one overlay."""
+    text = re.sub(r"\s+", " ", text).strip()
+    # Remove accidental spaces before punctuation, common after ASR/translation.
+    text = re.sub(r"\s+([,.;:!?%])", r"\1", text)
+    return text
+
+
+def add_reading_punctuation(text, final=False):
+    """Add a sentence ending when the translator returns plain text only."""
+    text = clean_subtitle_text(text)
+    if not text:
+        return ""
+    if text[-1] in SENTENCE_ENDINGS:
+        return text
+    return f"{text}." if final else f"{text}…"
+
+
+def format_subtitles(completed_lines, live_line=""):
+    """Show completed sentences on separate lines plus the current live sentence."""
+    lines = [line for line in completed_lines if line]
+    if live_line:
+        lines.append(live_line)
+    if not lines:
+        return "🎙️"
+    return "🎙️ " + "\n".join(lines[-4:])
 
 
 def _installed_translation_codes():
@@ -124,6 +154,7 @@ class AudioTranslator(QObject):
         self.audio_buffer = []
         self.buffer_lock = threading.Lock()
         self.text_history = deque(maxlen=4)
+        self.translated_history = deque(maxlen=4)
 
         ensure_translation_package(source_lang, TARGET_LANG)
         self.model = load_whisper_model()
@@ -173,11 +204,13 @@ class AudioTranslator(QObject):
                 if audio is not None:
                     if np.max(np.abs(audio)) > SILENCE_THRESHOLD:
                         try:
+                            initial_prompt = " ".join(self.text_history) or None
                             segments, _ = self.model.transcribe(
                                 audio,
                                 language=self.source_lang,
                                 beam_size=2,
                                 vad_filter=True,
+                                initial_prompt=initial_prompt,
                             )
                             current_text = " ".join(s.text.strip() for s in segments).strip()
                         except Exception as e:
@@ -192,16 +225,25 @@ class AudioTranslator(QObject):
                         )
                         is_too_long = current_len > max_samples
 
-                        history_text = " ".join(self.text_history)
-                        full_context = f"{history_text} {current_text}".strip()
-
-                        if full_context:
-                            translated = translate_text(full_context, self.source_lang, TARGET_LANG)
-                            self.translation_ready.emit(f"🎙️ {translated}")
+                        if current_text:
+                            if is_silence or is_too_long:
+                                # The speaker paused (or the block is long), so treat this as
+                                # a finished sentence. Add punctuation and move it to history.
+                                translated = translate_text(current_text, self.source_lang, TARGET_LANG)
+                                final_line = add_reading_punctuation(translated, final=True)
+                                self.text_history.append(current_text)
+                                self.translated_history.append(final_line)
+                                self.translation_ready.emit(format_subtitles(self.translated_history))
+                            else:
+                                # Live/unfinished subtitle: use an ellipsis so it is clear the
+                                # sentence is still continuing instead of looking like one long run-on.
+                                translated = translate_text(current_text, self.source_lang, TARGET_LANG)
+                                live_line = add_reading_punctuation(translated, final=False)
+                                self.translation_ready.emit(
+                                    format_subtitles(self.translated_history, live_line)
+                                )
 
                         if is_silence or is_too_long:
-                            if current_text:
-                                self.text_history.append(current_text)
                             with self.buffer_lock:
                                 del self.audio_buffer[:current_len]
                     else:
