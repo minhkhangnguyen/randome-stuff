@@ -64,7 +64,6 @@ class AudioTranslator(QObject):
         self.buffer = deque(maxlen=int(SAMPLE_RATE * 12))
 
     def audio_callback(self, indata, frames, time_info, status):
-        # Convert to mono
         if len(indata.shape) > 1 and indata.shape[1] > 1:
             mono = np.mean(indata, axis=1)
         else:
@@ -75,23 +74,32 @@ class AudioTranslator(QObject):
         def loop():
             min_samples = int(SAMPLE_RATE * MIN_AUDIO_SECONDS)
             
-            # Get default output device (speakers)
+            # Try to find a loopback device first
+            devices = sd.query_devices()
+            loopback_device = None
+            
+            for i, dev in enumerate(devices):
+                if dev['max_input_channels'] > 0 and ('loopback' in dev['name'].lower() or 'stereo mix' in dev['name'].lower()):
+                    loopback_device = i
+                    break
+
+            # Fallback: use default output device with 2 channels
+            if loopback_device is None:
+                try:
+                    loopback_device = sd.default.device[1]
+                except:
+                    loopback_device = None
+
+            print(f"🎙️ Using audio device: {loopback_device}")
+
             try:
-                default_output = sd.default.device[1]
-                if default_output is None:
-                    default_output = 0
-                    
-                device_info = sd.query_devices(default_output)
-                channels = min(device_info['max_output_channels'], 2)
-                
-                print(f"🎙️ Capturing from: {device_info['name']} ({channels} channels)")
-                
+                # Force 2 channels (most common for system audio)
                 with sd.InputStream(
                     samplerate=SAMPLE_RATE,
-                    channels=channels,
+                    channels=2,                    # ← Force stereo
                     callback=self.audio_callback,
                     blocksize=int(SAMPLE_RATE * 0.1),
-                    device=default_output,
+                    device=loopback_device,
                     dtype='float32'
                 ):
                     while True:
