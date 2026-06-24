@@ -4,7 +4,6 @@ import time
 from collections import deque
 
 import numpy as np
-import soundcard as sc
 from faster_whisper import WhisperModel
 import argostranslate.package
 import argostranslate.translate
@@ -64,15 +63,25 @@ class AudioTranslator(QObject):
         self.buffer = deque(maxlen=int(SAMPLE_RATE * 12))
 
     def start(self):
-        def record_loop(mic):
-            with mic:
-                while True:
-                    data = mic.record(numframes=int(SAMPLE_RATE * 0.1))
-                    if len(data.shape) > 1 and data.shape[1] > 1:
-                        mono = np.mean(data, axis=1)
-                    else:
-                        mono = data.flatten()
-                    self.buffer.extend(mono.astype(np.float32))
+        def record_loop():
+            # Import soundcard inside the background thread!
+            # This prevents soundcard from initializing COM in MTA mode on the main thread,
+            # which otherwise causes PyQt5 (which requires STA mode) to crash with RPC_E_CHANGED_MODE.
+            import soundcard as sc
+            try:
+                speaker = sc.default_speaker()
+                mic = speaker.recorder(samplerate=SAMPLE_RATE)
+                print(f"✅ Successfully opened WASAPI Loopback on: {speaker.name}")
+                with mic:
+                    while True:
+                        data = mic.record(numframes=int(SAMPLE_RATE * 0.1))
+                        if len(data.shape) > 1 and data.shape[1] > 1:
+                            mono = np.mean(data, axis=1)
+                        else:
+                            mono = data.flatten()
+                        self.buffer.extend(mono.astype(np.float32))
+            except Exception as e:
+                print(f"❌ Failed to capture system audio: {e}")
 
         def process_loop():
             min_samples = int(SAMPLE_RATE * MIN_AUDIO_SECONDS)
@@ -96,17 +105,13 @@ class AudioTranslator(QObject):
                 time.sleep(0.25)
 
         try:
-            speaker = sc.default_speaker()
-            mic = speaker.recorder(samplerate=SAMPLE_RATE)
-            print(f"✅ Successfully opened WASAPI Loopback on: {speaker.name}")
-            
             # Start background thread to pull audio seamlessly
-            threading.Thread(target=record_loop, args=(mic,), daemon=True).start()
+            threading.Thread(target=record_loop, daemon=True).start()
             
             # Start process loop in this thread
             threading.Thread(target=process_loop, daemon=True).start()
         except Exception as e:
-            print(f"❌ Failed to capture system audio: {e}")
+            print(f"❌ Failed to start threads: {e}")
 
 class Overlay(QWidget):
     def __init__(self):
