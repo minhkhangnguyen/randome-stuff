@@ -1,7 +1,12 @@
 import sys
+import os
 import threading
 import time
 from collections import deque
+
+# Disable HuggingFace Symlink requirement on Windows
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["HF_HUB_DISABLE_IMPLICIT_SYMLINKS"] = "1"
 
 import numpy as np
 from faster_whisper import WhisperModel
