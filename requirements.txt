@@ -1,0 +1,8 @@
+faster-whisper
+argostranslate
+mss
+pytesseract
+PyQt5
+sounddevice
+pillow
+numpy
