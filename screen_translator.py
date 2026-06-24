@@ -52,14 +52,26 @@ def configure_tesseract():
                 break
 
     # Use project-local language files downloaded by install_tesseract.bat.
+    # Do NOT wrap this path in quotes. Tesseract receives the quote as part of
+    # the path on some Windows/Python setups and then looks for:
+    #   "D:/randome-stuff/tessdata"/chi_sim.traineddata
     if TESSDATA_DIR.exists():
         os.environ["TESSDATA_PREFIX"] = _windows_safe_path(TESSDATA_DIR)
 
 
 def tesseract_config():
     if TESSDATA_DIR.exists():
-        return f'--tessdata-dir "{_windows_safe_path(TESSDATA_DIR)}" --oem 3 --psm 6'
+        return f"--tessdata-dir {_windows_safe_path(TESSDATA_DIR)} --oem 3 --psm 6"
     return "--oem 3 --psm 6"
+
+
+def missing_tessdata_languages():
+    if not TESSDATA_DIR.exists():
+        return OCR_LANG.split("+")
+    return [
+        lang for lang in OCR_LANG.split("+")
+        if lang and not (TESSDATA_DIR / f"{lang}.traineddata").exists()
+    ]
 
 
 def clean_ocr_text(text):
@@ -231,6 +243,15 @@ class ScreenTranslator(QObject):
                 }
                 shot = sct.grab(monitor)
                 img = Image.frombytes("RGB", shot.size, shot.rgb)
+
+            missing_langs = missing_tessdata_languages()
+            if missing_langs:
+                raise RuntimeError(
+                    "Missing Tesseract language files: "
+                    + ", ".join(missing_langs)
+                    + f"\nExpected folder: {_windows_safe_path(TESSDATA_DIR)}\n"
+                    + "Run install_tesseract.bat again."
+                )
 
             img = preprocess_for_ocr(img)
             ocr_text = pytesseract.image_to_string(
