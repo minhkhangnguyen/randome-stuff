@@ -62,12 +62,21 @@ class AudioTranslator(QObject):
         
         self.model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
         self.buffer = deque(maxlen=int(SAMPLE_RATE * 12))
+        self.current_sr = SAMPLE_RATE
 
     def audio_callback(self, indata, frames, time_info, status):
         if len(indata.shape) > 1 and indata.shape[1] > 1:
             mono = np.mean(indata, axis=1)
         else:
             mono = indata.flatten()
+            
+        if self.current_sr != SAMPLE_RATE:
+            # Resample dynamically
+            num_samples = int(len(mono) * SAMPLE_RATE / self.current_sr)
+            x_old = np.linspace(0, 1, len(mono))
+            x_new = np.linspace(0, 1, num_samples)
+            mono = np.interp(x_new, x_old, mono).astype(np.float32)
+            
         self.buffer.extend(mono)
 
     def start(self):
@@ -75,71 +84,119 @@ class AudioTranslator(QObject):
             min_samples = int(SAMPLE_RATE * MIN_AUDIO_SECONDS)
             devices = sd.query_devices()
             
-            # Try to find working input device
-            working_device = None
+            # Find candidate devices
+            candidate_devices = []
             
-            # Priority 1: Stereo Mix
+            # 1. WASAPI loopback (default output device)
+            try:
+                hostapis = sd.query_hostapis()
+                for i, api in enumerate(hostapis):
+                    if 'WASAPI' in api['name']:
+                        default_out = api['default_output_device']
+                        if default_out >= 0:
+                            candidate_devices.append(('wasapi_loopback', default_out))
+                        break
+            except:
+                pass
+                
+            # 2. Stereo Mix
             for i, dev in enumerate(devices):
                 if dev['max_input_channels'] > 0 and 'stereo mix' in dev['name'].lower():
-                    working_device = i
-                    break
-            
-            # Priority 2: Any device with "input" in name
-            if working_device is None:
-                for i, dev in enumerate(devices):
-                    if dev['max_input_channels'] > 0 and 'input' in dev['name'].lower():
-                        working_device = i
-                        break
-            
-            # Priority 3: Default input device
-            if working_device is None:
-                try:
-                    working_device = sd.default.device[0]
-                except:
-                    pass
-            
-            if working_device is None:
-                print("❌ No suitable audio input device found")
+                    candidate_devices.append(('input', i))
+                    
+            # 3. Any input device with "input" in name
+            for i, dev in enumerate(devices):
+                if dev['max_input_channels'] > 0 and 'input' in dev['name'].lower():
+                    candidate_devices.append(('input', i))
+                    
+            # 4. Default input device
+            try:
+                candidate_devices.append(('input', sd.default.device[0]))
+            except:
+                pass
+                
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_candidates = []
+            for c in candidate_devices:
+                if c[1] not in seen:
+                    seen.add(c[1])
+                    unique_candidates.append(c)
+                    
+            if not unique_candidates:
+                print("❌ No suitable audio devices found")
                 return
-            
-            print(f"🎙️ Using device {working_device}: {devices[working_device]['name']}")
-            
-            # Try different channel counts
-            for ch in [2, 1]:
-                try:
-                    with sd.InputStream(
-                        samplerate=SAMPLE_RATE,
-                        channels=ch,
-                        callback=self.audio_callback,
-                        blocksize=int(SAMPLE_RATE * 0.1),
-                        device=working_device,
-                        dtype='float32'
-                    ):
-                        print(f"✅ Successfully opened with {ch} channels")
-                        
-                        while True:
-                            if len(self.buffer) >= min_samples:
-                                audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
+                
+            stream_opened = False
+            for dev_type, working_device in unique_candidates:
+                if stream_opened:
+                    break
+                print(f"🎙️ Trying device {working_device}: {devices[working_device]['name']} ({dev_type})")
+                
+                # Fetch device max channels
+                if dev_type == 'wasapi_loopback':
+                    max_ch = devices[working_device]['max_output_channels']
+                    ch_options = [max_ch, 2, 1] if max_ch > 0 else [2, 1]
+                else:
+                    max_ch = devices[working_device]['max_input_channels']
+                    ch_options = [max_ch, 2, 1] if max_ch > 0 else [2, 1]
+                    
+                # Remove duplicates and preserve order
+                ch_options = list(dict.fromkeys(ch_options))
+                
+                # Try 16000 first, then default_samplerate
+                native_sr = int(devices[working_device]['default_samplerate'])
+                sr_options = [SAMPLE_RATE, native_sr]
+                sr_options = list(dict.fromkeys(sr_options))
+                
+                for sr in sr_options:
+                    if stream_opened: break
+                    for ch in ch_options:
+                        if stream_opened: break
+                        try:
+                            extra_settings = None
+                            if dev_type == 'wasapi_loopback' and hasattr(sd, 'WasapiSettings'):
+                                extra_settings = sd.WasapiSettings(exclusive=False, loopback=True)
+                            elif dev_type == 'wasapi_loopback':
+                                continue # Cannot use WASAPI loopback without WasapiSettings
                                 
-                                if np.max(np.abs(audio)) > 0.003:
-                                    segments, _ = self.model.transcribe(
-                                        audio, 
-                                        language=self.source_lang,
-                                        beam_size=1,
-                                        vad_filter=True
-                                    )
-                                    text = " ".join([s.text for s in segments]).strip()
+                            with sd.InputStream(
+                                samplerate=sr,
+                                channels=ch,
+                                callback=self.audio_callback,
+                                blocksize=int(sr * 0.1),
+                                device=working_device,
+                                dtype='float32',
+                                extra_settings=extra_settings
+                            ):
+                                self.current_sr = sr
+                                print(f"✅ Successfully opened with {ch} channels at {sr}Hz")
+                                stream_opened = True
+                                
+                                while True:
+                                    if len(self.buffer) >= min_samples:
+                                        audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
+                                        
+                                        if np.max(np.abs(audio)) > 0.003:
+                                            segments, _ = self.model.transcribe(
+                                                audio, 
+                                                language=self.source_lang,
+                                                beam_size=1,
+                                                vad_filter=True
+                                            )
+                                            text = " ".join([s.text for s in segments]).strip()
+                                            
+                                            if text and len(text) > 1:
+                                                translated = translate_text(text, self.source_lang, TARGET_LANG)
+                                                self.translation_ready.emit(f"🎙️ {translated}")
                                     
-                                    if text and len(text) > 1:
-                                        translated = translate_text(text, self.source_lang, TARGET_LANG)
-                                        self.translation_ready.emit(f"🎙️ {translated}")
+                                    time.sleep(0.25)
+                        except Exception as e:
+                            print(f"Failed with {ch} channels at {sr}Hz: {e}")
+                            continue
                             
-                            time.sleep(0.25)
-                except Exception as e:
-                    print(f"Failed with {ch} channels: {e}")
-                    continue
-            
-            print("❌ Could not open audio device with any channel count")
+            if not stream_opened:
+                print("❌ Could not open audio device with any channel count")
                 
         threading.Thread(target=loop, daemon=True).start()
 
