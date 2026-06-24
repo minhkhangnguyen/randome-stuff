@@ -128,10 +128,10 @@ class AudioTranslator(QObject):
                 # Remove duplicates and preserve order
                 ch_options = list(dict.fromkeys(ch_options))
                 
-                # Try 16000 first, then default_samplerate
+                # Only test 16000Hz if it's the native sample rate, otherwise just skip directly to native
+                # This prevents the ugly console error spam when 16000Hz is unsupported
                 native_sr = int(devices[working_device]['default_samplerate'])
-                sr_options = [SAMPLE_RATE, native_sr]
-                sr_options = list(dict.fromkeys(sr_options))
+                sr_options = [native_sr] if native_sr != SAMPLE_RATE else [SAMPLE_RATE]
                 
                 for sr in sr_options:
                     if stream_opened: break
