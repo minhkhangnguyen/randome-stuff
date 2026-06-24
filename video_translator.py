@@ -4,9 +4,6 @@ import time
 from collections import deque
 
 import numpy as np
-import mss
-import pytesseract
-from PIL import Image
 import sounddevice as sd
 from faster_whisper import WhisperModel
 import argostranslate.package
@@ -20,8 +17,7 @@ SOURCE_LANG = "zh"
 TARGET_LANG = "vi"
 WHISPER_MODEL = "tiny"
 SAMPLE_RATE = 16000
-MIN_AUDIO_SECONDS = 1.0          # Minimum audio before transcription
-CHUNK_SECONDS = 0.8              # Check every 800ms
+MIN_AUDIO_SECONDS = 1.0
 
 def ensure_translation_package(source_lang, target_lang):
     try:
@@ -65,7 +61,7 @@ class AudioTranslator(QObject):
         ensure_translation_package(source_lang, TARGET_LANG)
         
         self.model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-        self.buffer = deque(maxlen=int(SAMPLE_RATE * 8))  # Keep 8 seconds
+        self.buffer = deque(maxlen=int(SAMPLE_RATE * 10))
 
     def audio_callback(self, indata, frames, time_info, status):
         self.buffer.extend(indata[:, 0])
@@ -74,28 +70,38 @@ class AudioTranslator(QObject):
         def loop():
             min_samples = int(SAMPLE_RATE * MIN_AUDIO_SECONDS)
             
-            with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
-                                callback=self.audio_callback,
-                                blocksize=int(SAMPLE_RATE * 0.1)):
-                while True:
-                    if len(self.buffer) >= min_samples:
-                        audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
-                        
-                        # Only transcribe if there's actual sound
-                        if np.max(np.abs(audio)) > 0.01:
-                            segments, _ = self.model.transcribe(
-                                audio, 
-                                language=self.source_lang,
-                                beam_size=1,
-                                vad_filter=True
-                            )
-                            text = " ".join([s.text for s in segments]).strip()
+            # Use WASAPI loopback (captures system audio even if speakers are muted)
+            try:
+                with sd.InputStream(
+                    samplerate=SAMPLE_RATE,
+                    channels=1,
+                    callback=self.audio_callback,
+                    blocksize=int(SAMPLE_RATE * 0.1),
+                    device=None,           # Use default
+                    dtype='float32'
+                ):
+                    print("🎙️ Capturing system audio (works even when muted)")
+                    while True:
+                        if len(self.buffer) >= min_samples:
+                            audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
                             
-                            if text and len(text) > 1:
-                                translated = translate_text(text, self.source_lang, TARGET_LANG)
-                                self.translation_ready.emit(f"🎙️ {translated}")
-                    
-                    time.sleep(0.3)
+                            if np.max(np.abs(audio)) > 0.005:
+                                segments, _ = self.model.transcribe(
+                                    audio, 
+                                    language=self.source_lang,
+                                    beam_size=1,
+                                    vad_filter=True
+                                )
+                                text = " ".join([s.text for s in segments]).strip()
+                                
+                                if text and len(text) > 1:
+                                    translated = translate_text(text, self.source_lang, TARGET_LANG)
+                                    self.translation_ready.emit(f"🎙️ {translated}")
+                        
+                        time.sleep(0.25)
+            except Exception as e:
+                print(f"Audio error: {e}")
+                
         threading.Thread(target=loop, daemon=True).start()
 
 class Overlay(QWidget):
@@ -105,7 +111,7 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setGeometry(100, 100, 650, 140)
 
-        self.label = QLabel("Ready - Listening for audio...")
+        self.label = QLabel("Ready - Capturing system audio (even when muted)")
         self.label.setFont(QFont("Segoe UI", 14))
         self.label.setStyleSheet("color: #00ffcc; background-color: rgba(0,0,0,200); padding: 15px; border-radius: 8px;")
         self.label.setAlignment(Qt.AlignCenter)
@@ -128,7 +134,7 @@ def main():
     audio.translation_ready.connect(overlay.show_translation)
     audio.start()
 
-    print("✅ Translator is running (Low latency mode)")
+    print("✅ Translator running (System audio capture enabled)")
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
