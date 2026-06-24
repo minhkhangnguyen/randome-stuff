@@ -73,61 +73,73 @@ class AudioTranslator(QObject):
     def start(self):
         def loop():
             min_samples = int(SAMPLE_RATE * MIN_AUDIO_SECONDS)
-            
             devices = sd.query_devices()
-            stereo_mix_device = None
             
-            # Find Stereo Mix device
+            # Try to find working input device
+            working_device = None
+            
+            # Priority 1: Stereo Mix
             for i, dev in enumerate(devices):
                 if dev['max_input_channels'] > 0 and 'stereo mix' in dev['name'].lower():
-                    stereo_mix_device = i
+                    working_device = i
                     break
             
-            if stereo_mix_device is None:
-                # Fallback: try any device with "input" in name
+            # Priority 2: Any device with "input" in name
+            if working_device is None:
                 for i, dev in enumerate(devices):
                     if dev['max_input_channels'] > 0 and 'input' in dev['name'].lower():
-                        stereo_mix_device = i
+                        working_device = i
                         break
             
-            if stereo_mix_device is None:
-                print("❌ Could not find Stereo Mix or suitable input device")
-                print("Please enable 'Stereo Mix' in Windows Sound settings")
+            # Priority 3: Default input device
+            if working_device is None:
+                try:
+                    working_device = sd.default.device[0]
+                except:
+                    pass
+            
+            if working_device is None:
+                print("❌ No suitable audio input device found")
                 return
             
-            print(f"🎙️ Using device {stereo_mix_device}: {devices[stereo_mix_device]['name']}")
+            print(f"🎙️ Using device {working_device}: {devices[working_device]['name']}")
             
-            try:
-                with sd.InputStream(
-                    samplerate=SAMPLE_RATE,
-                    channels=2,
-                    callback=self.audio_callback,
-                    blocksize=int(SAMPLE_RATE * 0.1),
-                    device=stereo_mix_device,
-                    dtype='float32'
-                ):
-                    print("✅ Successfully opened Stereo Mix")
-                    
-                    while True:
-                        if len(self.buffer) >= min_samples:
-                            audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
-                            
-                            if np.max(np.abs(audio)) > 0.003:
-                                segments, _ = self.model.transcribe(
-                                    audio, 
-                                    language=self.source_lang,
-                                    beam_size=1,
-                                    vad_filter=True
-                                )
-                                text = " ".join([s.text for s in segments]).strip()
-                                
-                                if text and len(text) > 1:
-                                    translated = translate_text(text, self.source_lang, TARGET_LANG)
-                                    self.translation_ready.emit(f"🎙️ {translated}")
+            # Try different channel counts
+            for ch in [2, 1]:
+                try:
+                    with sd.InputStream(
+                        samplerate=SAMPLE_RATE,
+                        channels=ch,
+                        callback=self.audio_callback,
+                        blocksize=int(SAMPLE_RATE * 0.1),
+                        device=working_device,
+                        dtype='float32'
+                    ):
+                        print(f"✅ Successfully opened with {ch} channels")
                         
-                        time.sleep(0.25)
-            except Exception as e:
-                print(f"Audio capture error: {e}")
+                        while True:
+                            if len(self.buffer) >= min_samples:
+                                audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
+                                
+                                if np.max(np.abs(audio)) > 0.003:
+                                    segments, _ = self.model.transcribe(
+                                        audio, 
+                                        language=self.source_lang,
+                                        beam_size=1,
+                                        vad_filter=True
+                                    )
+                                    text = " ".join([s.text for s in segments]).strip()
+                                    
+                                    if text and len(text) > 1:
+                                        translated = translate_text(text, self.source_lang, TARGET_LANG)
+                                        self.translation_ready.emit(f"🎙️ {translated}")
+                            
+                            time.sleep(0.25)
+                except Exception as e:
+                    print(f"Failed with {ch} channels: {e}")
+                    continue
+            
+            print("❌ Could not open audio device with any channel count")
                 
         threading.Thread(target=loop, daemon=True).start()
 
@@ -138,7 +150,7 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setGeometry(100, 100, 650, 140)
 
-        self.label = QLabel("Ready - Capturing system audio (Stereo Mix)")
+        self.label = QLabel("Ready - Capturing system audio")
         self.label.setFont(QFont("Segoe UI", 14))
         self.label.setStyleSheet("color: #00ffcc; background-color: rgba(0,0,0,200); padding: 15px; border-radius: 8px;")
         self.label.setAlignment(Qt.AlignCenter)
@@ -161,7 +173,7 @@ def main():
     audio.translation_ready.connect(overlay.show_translation)
     audio.start()
 
-    print("✅ Translator running (Stereo Mix mode)")
+    print("✅ Translator running")
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
