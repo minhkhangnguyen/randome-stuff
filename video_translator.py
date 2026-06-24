@@ -66,6 +66,11 @@ class AudioTranslator(QObject):
         def record_loop():
             # Import soundcard inside the background thread!
             import soundcard as sc
+            import warnings
+            
+            # Suppress harmless discontinuity warnings when audio is silent
+            warnings.filterwarnings("ignore", message="data discontinuity in recording")
+            
             try:
                 speaker = sc.default_speaker()
                 mic = sc.get_microphone(id=str(speaker.name), include_loopback=True)
