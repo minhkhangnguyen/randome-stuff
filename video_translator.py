@@ -23,12 +23,30 @@ OCR_REGION = None
 SAMPLE_RATE = 16000
 CHUNK_DURATION = 5
 
+def ensure_translation_package(source_lang, target_lang):
+    """Automatically install translation package if missing"""
+    try:
+        argostranslate.translate.translate("test", source_lang, target_lang)
+    except Exception:
+        print(f"Downloading translation model: {source_lang} → {target_lang} ...")
+        argostranslate.package.update_package_index()
+        available_packages = argostranslate.package.get_available_packages()
+        package = next(
+            (p for p in available_packages 
+             if p.from_code == source_lang and p.to_code == target_lang), None)
+        if package:
+            argostranslate.package.install_from_path(package.download())
+            print(f"✅ {source_lang} → {target_lang} model installed.")
+        else:
+            print(f"⚠️ Could not find package for {source_lang} → {target_lang}")
+
 class AudioTranslator(QObject):
     translation_ready = pyqtSignal(str)
 
     def __init__(self, source_lang):
         super().__init__()
         self.source_lang = source_lang
+        ensure_translation_package(source_lang, TARGET_LANG)
         self.model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
         self.audio_buffer = deque(maxlen=int(SAMPLE_RATE * CHUNK_DURATION))
 
@@ -53,7 +71,7 @@ class AudioTranslator(QObject):
                                     text, self.source_lang, TARGET_LANG)
                                 self.translation_ready.emit(f"🎙️ {translated}")
                             except Exception as e:
-                                self.translation_ready.emit(f"⚠️ Translation error: {str(e)[:50]}")
+                                self.translation_ready.emit(f"⚠️ {str(e)[:60]}")
 
                     time.sleep(0.5)
         threading.Thread(target=loop, daemon=True).start()
@@ -64,7 +82,8 @@ class SubtitleTranslator(QObject):
     def __init__(self, source_lang):
         super().__init__()
         self.source_lang = source_lang
-        self.sct = mss.mss()   # Fixed deprecation
+        ensure_translation_package(source_lang, TARGET_LANG)
+        self.sct = mss.MSS()   # Fixed deprecation
 
     def capture_and_translate(self):
         if OCR_REGION is None:
@@ -80,7 +99,7 @@ class SubtitleTranslator(QObject):
                     text, self.source_lang, TARGET_LANG)
                 self.translation_ready.emit(f"📺 {translated}")
             except Exception as e:
-                self.translation_ready.emit(f"⚠️ OCR Translation error")
+                self.translation_ready.emit(f"⚠️ {str(e)[:60]}")
 
 class Overlay(QWidget):
     def __init__(self):
