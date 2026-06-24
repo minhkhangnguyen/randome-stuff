@@ -64,39 +64,34 @@ class AudioTranslator(QObject):
         self.buffer = deque(maxlen=int(SAMPLE_RATE * 12))
 
     def audio_callback(self, indata, frames, time_info, status):
-        self.buffer.extend(indata[:, 0])
+        # Convert to mono
+        if len(indata.shape) > 1 and indata.shape[1] > 1:
+            mono = np.mean(indata, axis=1)
+        else:
+            mono = indata.flatten()
+        self.buffer.extend(mono)
 
     def start(self):
         def loop():
             min_samples = int(SAMPLE_RATE * MIN_AUDIO_SECONDS)
             
-            # Try to find WASAPI loopback device (system audio)
-            devices = sd.query_devices()
-            loopback_device = None
-            
-            for i, device in enumerate(devices):
-                if device['max_input_channels'] > 0 and 'loopback' in device['name'].lower():
-                    loopback_device = i
-                    break
-            
-            # If no loopback device found, use default output device as input
-            if loopback_device is None:
-                try:
-                    default_output = sd.default.device[1]
-                    if default_output is not None:
-                        loopback_device = default_output
-                except:
-                    loopback_device = None
-
-            print(f"🎙️ Using audio device: {loopback_device}")
-
+            # Get default output device (speakers)
             try:
+                default_output = sd.default.device[1]
+                if default_output is None:
+                    default_output = 0
+                    
+                device_info = sd.query_devices(default_output)
+                channels = min(device_info['max_output_channels'], 2)
+                
+                print(f"🎙️ Capturing from: {device_info['name']} ({channels} channels)")
+                
                 with sd.InputStream(
                     samplerate=SAMPLE_RATE,
-                    channels=1,
+                    channels=channels,
                     callback=self.audio_callback,
                     blocksize=int(SAMPLE_RATE * 0.1),
-                    device=loopback_device,
+                    device=default_output,
                     dtype='float32'
                 ):
                     while True:
