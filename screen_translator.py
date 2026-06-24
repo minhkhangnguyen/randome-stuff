@@ -35,22 +35,30 @@ COMMON_TESSERACT_PATHS = [
 ]
 
 
+def _windows_safe_path(path):
+    # Tesseract on Windows can misread backslash escapes such as \t in \tessdata.
+    # Forward slashes are accepted by Windows and avoid that problem.
+    return str(path).replace("\\", "/")
+
+
 def configure_tesseract():
     configured = os.environ.get("TESSERACT_CMD")
     if configured:
         pytesseract.pytesseract.tesseract_cmd = configured
-        return
+    else:
+        for path in COMMON_TESSERACT_PATHS:
+            if os.path.exists(path):
+                pytesseract.pytesseract.tesseract_cmd = path
+                break
 
-    for path in COMMON_TESSERACT_PATHS:
-        if os.path.exists(path):
-            pytesseract.pytesseract.tesseract_cmd = path
-            return
+    # Use project-local language files downloaded by install_tesseract.bat.
+    if TESSDATA_DIR.exists():
+        os.environ["TESSDATA_PREFIX"] = _windows_safe_path(TESSDATA_DIR)
 
 
 def tesseract_config():
-    # Use project-local language files downloaded by install_tesseract.bat.
     if TESSDATA_DIR.exists():
-        return f'--tessdata-dir "{TESSDATA_DIR}" --oem 3 --psm 6'
+        return f'--tessdata-dir "{_windows_safe_path(TESSDATA_DIR)}" --oem 3 --psm 6'
     return "--oem 3 --psm 6"
 
 
