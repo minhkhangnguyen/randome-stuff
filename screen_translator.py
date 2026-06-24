@@ -2,7 +2,7 @@ import os
 import re
 import sys
 import threading
-import time
+from pathlib import Path
 from dataclasses import dataclass
 
 import mss
@@ -17,6 +17,9 @@ from PyQt5.QtCore import Qt, QRect, QPoint, pyqtSignal, QObject, QTimer
 from PyQt5.QtGui import QFont, QPainter, QColor, QPen
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QRubberBand
 
+
+BASE_DIR = Path(__file__).resolve().parent
+TESSDATA_DIR = Path(os.environ.get("TESSDATA_DIR", str(BASE_DIR / "tessdata")))
 
 TARGET_LANG = os.environ.get("TARGET_LANG", "vi")
 # Tesseract languages. Use chi_sim for simplified Chinese, chi_tra for traditional Chinese, jpn for Japanese.
@@ -42,6 +45,13 @@ def configure_tesseract():
         if os.path.exists(path):
             pytesseract.pytesseract.tesseract_cmd = path
             return
+
+
+def tesseract_config():
+    # Use project-local language files downloaded by install_tesseract.bat.
+    if TESSDATA_DIR.exists():
+        return f'--tessdata-dir "{TESSDATA_DIR}" --oem 3 --psm 6'
+    return "--oem 3 --psm 6"
 
 
 def clean_ocr_text(text):
@@ -218,7 +228,7 @@ class ScreenTranslator(QObject):
             ocr_text = pytesseract.image_to_string(
                 img,
                 lang=OCR_LANG,
-                config="--oem 3 --psm 6",
+                config=tesseract_config(),
             )
             ocr_text = clean_ocr_text(ocr_text)
             norm = normalize_for_compare(ocr_text)
@@ -241,8 +251,8 @@ class ScreenTranslator(QObject):
         self.overlay.show_text(
             "❌ Screen OCR failed:\n"
             f"{message}\n\n"
-            "If it says Tesseract is not installed, install Tesseract OCR and Chinese/Japanese language data.\n"
-            "You can also set: TESSERACT_CMD=C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
+            "Run install_tesseract.bat once, then run_screen.bat again.\n"
+            "If Tesseract is already installed somewhere else, set TESSERACT_CMD to tesseract.exe."
         )
 
 
