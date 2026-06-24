@@ -22,6 +22,10 @@ from faster_whisper import WhisperModel
 from faster_whisper.utils import download_model
 import argostranslate.package
 import argostranslate.translate
+try:
+    from deep_translator import GoogleTranslator
+except Exception:
+    GoogleTranslator = None
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout
 from PyQt5.QtCore import Qt, pyqtSignal, QObject
 from PyQt5.QtGui import QFont
@@ -30,11 +34,14 @@ from PyQt5.QtGui import QFont
 # Override with: python video_translator.py zh  OR  python video_translator.py ja
 SOURCE_LANG = os.environ.get("SOURCE_LANG", "zh")
 TARGET_LANG = os.environ.get("TARGET_LANG", "vi")
+# google = online Google Translate, argos/local = offline Argos Translate
+TRANSLATOR = os.environ.get("TRANSLATOR", "google").lower()
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 SAMPLE_RATE = 16000
 MIN_AUDIO_SECONDS = 1.0
 SILENCE_THRESHOLD = 0.005
 SENTENCE_ENDINGS = ".!?…。！？"
+GOOGLE_LANG_CODES = {"zh": "zh-CN", "ja": "ja", "vi": "vi", "en": "en"}
 
 
 def clean_subtitle_text(text):
@@ -110,18 +117,38 @@ def ensure_translation_package(source_lang, target_lang):
     print("✅ Bridge translation models installed")
 
 
+def translate_with_google(text, source_lang, target_lang):
+    if GoogleTranslator is None:
+        raise RuntimeError("deep-translator is not installed")
+
+    google_source = GOOGLE_LANG_CODES.get(source_lang, source_lang)
+    google_target = GOOGLE_LANG_CODES.get(target_lang, target_lang)
+    return GoogleTranslator(source=google_source, target=google_target).translate(text)
+
+
+def translate_with_argos(text, source_lang, target_lang):
+    try:
+        return argostranslate.translate.translate(text, source_lang, target_lang)
+    except Exception:
+        en_text = argostranslate.translate.translate(text, source_lang, "en")
+        return argostranslate.translate.translate(en_text, "en", target_lang)
+
+
 def translate_text(text, source_lang, target_lang):
     if not text.strip():
         return ""
 
-    try:
-        return argostranslate.translate.translate(text, source_lang, target_lang)
-    except Exception:
+    if TRANSLATOR in {"google", "googletranslate", "google_translate"}:
         try:
-            en_text = argostranslate.translate.translate(text, source_lang, "en")
-            return argostranslate.translate.translate(en_text, "en", target_lang)
-        except Exception:
-            return text
+            return translate_with_google(text, source_lang, target_lang)
+        except Exception as e:
+            print(f"⚠️ Google Translate failed, trying local Argos fallback: {e}")
+
+    try:
+        return translate_with_argos(text, source_lang, target_lang)
+    except Exception as e:
+        print(f"⚠️ Local translation failed: {e}")
+        return text
 
 
 def load_whisper_model():
@@ -156,7 +183,8 @@ class AudioTranslator(QObject):
         self.text_history = deque(maxlen=4)
         self.translated_history = deque(maxlen=4)
 
-        ensure_translation_package(source_lang, TARGET_LANG)
+        if TRANSLATOR in {"argos", "local", "offline"}:
+            ensure_translation_package(source_lang, TARGET_LANG)
         self.model = load_whisper_model()
 
     def start(self):
@@ -298,7 +326,7 @@ def main():
         audio = AudioTranslator(source_lang)
         audio.translation_ready.connect(overlay.show_translation)
         audio.start()
-        print(f"✅ Translator running ({source_lang} → {TARGET_LANG})")
+        print(f"✅ Translator running ({source_lang} → {TARGET_LANG}, translator={TRANSLATOR})")
     except Exception as e:
         message = f"❌ Translator startup failed: {e}"
         print(message)
