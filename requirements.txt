@@ -3,6 +3,6 @@ argostranslate
 mss
 pytesseract
 PyQt5
-sounddevice
+soundcard
 pillow
 numpy

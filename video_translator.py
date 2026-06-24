@@ -4,7 +4,7 @@ import time
 from collections import deque
 
 import numpy as np
-import sounddevice as sd
+import soundcard as sc
 from faster_whisper import WhisperModel
 import argostranslate.package
 import argostranslate.translate
@@ -62,120 +62,51 @@ class AudioTranslator(QObject):
         
         self.model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
         self.buffer = deque(maxlen=int(SAMPLE_RATE * 12))
-        self.current_sr = SAMPLE_RATE
-
-    def audio_callback(self, indata, frames, time_info, status):
-        if len(indata.shape) > 1 and indata.shape[1] > 1:
-            mono = np.mean(indata, axis=1)
-        else:
-            mono = indata.flatten()
-            
-        if self.current_sr != SAMPLE_RATE:
-            # Resample dynamically
-            num_samples = int(len(mono) * SAMPLE_RATE / self.current_sr)
-            x_old = np.linspace(0, 1, len(mono))
-            x_new = np.linspace(0, 1, num_samples)
-            mono = np.interp(x_new, x_old, mono).astype(np.float32)
-            
-        self.buffer.extend(mono)
 
     def start(self):
-        def loop():
+        def record_loop(mic):
+            with mic:
+                while True:
+                    data = mic.record(numframes=int(SAMPLE_RATE * 0.1))
+                    if len(data.shape) > 1 and data.shape[1] > 1:
+                        mono = np.mean(data, axis=1)
+                    else:
+                        mono = data.flatten()
+                    self.buffer.extend(mono.astype(np.float32))
+
+        def process_loop():
             min_samples = int(SAMPLE_RATE * MIN_AUDIO_SECONDS)
-            devices = sd.query_devices()
+            while True:
+                if len(self.buffer) >= min_samples:
+                    audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
+                    
+                    if np.max(np.abs(audio)) > 0.003:
+                        segments, _ = self.model.transcribe(
+                            audio, 
+                            language=self.source_lang,
+                            beam_size=1,
+                            vad_filter=True
+                        )
+                        text = " ".join([s.text for s in segments]).strip()
+                        
+                        if text and len(text) > 1:
+                            translated = translate_text(text, self.source_lang, TARGET_LANG)
+                            self.translation_ready.emit(f"🎙️ {translated}")
+                
+                time.sleep(0.25)
+
+        try:
+            speaker = sc.default_speaker()
+            mic = speaker.recorder(samplerate=SAMPLE_RATE)
+            print(f"✅ Successfully opened WASAPI Loopback on: {speaker.name}")
             
-            # Find candidate devices
-            candidate_devices = []
+            # Start background thread to pull audio seamlessly
+            threading.Thread(target=record_loop, args=(mic,), daemon=True).start()
             
-            # 1. Stereo Mix
-            for i, dev in enumerate(devices):
-                if dev['max_input_channels'] > 0 and 'stereo mix' in dev['name'].lower():
-                    candidate_devices.append(('input', i))
-                    
-            # 2. Any input device with "input" in name
-            for i, dev in enumerate(devices):
-                if dev['max_input_channels'] > 0 and 'input' in dev['name'].lower():
-                    candidate_devices.append(('input', i))
-                    
-            # 3. Default input device
-            try:
-                candidate_devices.append(('input', sd.default.device[0]))
-            except:
-                pass
-                
-            # Remove duplicates while preserving order
-            seen = set()
-            unique_candidates = []
-            for c in candidate_devices:
-                if c[1] not in seen:
-                    seen.add(c[1])
-                    unique_candidates.append(c)
-                    
-            if not unique_candidates:
-                print("❌ No suitable audio devices found")
-                return
-                
-            stream_opened = False
-            for dev_type, working_device in unique_candidates:
-                if stream_opened:
-                    break
-                print(f"🎙️ Trying device {working_device}: {devices[working_device]['name']} ({dev_type})")
-                
-                # Fetch device max channels
-                max_ch = devices[working_device]['max_input_channels']
-                ch_options = [max_ch, 2, 1] if max_ch > 0 else [2, 1]
-                    
-                # Remove duplicates and preserve order
-                ch_options = list(dict.fromkeys(ch_options))
-                
-                # Only test 16000Hz if it's the native sample rate, otherwise just skip directly to native
-                # This prevents the ugly console error spam when 16000Hz is unsupported
-                native_sr = int(devices[working_device]['default_samplerate'])
-                sr_options = [native_sr] if native_sr != SAMPLE_RATE else [SAMPLE_RATE]
-                
-                for sr in sr_options:
-                    if stream_opened: break
-                    for ch in ch_options:
-                        if stream_opened: break
-                        try:
-                            with sd.InputStream(
-                                samplerate=sr,
-                                channels=ch,
-                                callback=self.audio_callback,
-                                blocksize=int(sr * 0.1),
-                                device=working_device,
-                                dtype='float32'
-                            ):
-                                self.current_sr = sr
-                                print(f"✅ Successfully opened with {ch} channels at {sr}Hz")
-                                stream_opened = True
-                                
-                                while True:
-                                    if len(self.buffer) >= min_samples:
-                                        audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
-                                        
-                                        if np.max(np.abs(audio)) > 0.003:
-                                            segments, _ = self.model.transcribe(
-                                                audio, 
-                                                language=self.source_lang,
-                                                beam_size=1,
-                                                vad_filter=True
-                                            )
-                                            text = " ".join([s.text for s in segments]).strip()
-                                            
-                                            if text and len(text) > 1:
-                                                translated = translate_text(text, self.source_lang, TARGET_LANG)
-                                                self.translation_ready.emit(f"🎙️ {translated}")
-                                    
-                                    time.sleep(0.25)
-                        except Exception as e:
-                            print(f"Failed with {ch} channels at {sr}Hz: {e}")
-                            continue
-                            
-            if not stream_opened:
-                print("❌ Could not open audio device with any channel count")
-                
-        threading.Thread(target=loop, daemon=True).start()
+            # Start process loop in this thread
+            threading.Thread(target=process_loop, daemon=True).start()
+        except Exception as e:
+            print(f"❌ Failed to capture system audio: {e}")
 
 class Overlay(QWidget):
     def __init__(self):
