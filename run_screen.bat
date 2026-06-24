@@ -11,6 +11,7 @@ echo Starting screen area translator...
 echo Drag to select an area. Right-click subtitle box to close.
 set CAPTURE_INTERVAL_MS=300
 set SCREEN_MAX_LINES=5
-set SCREEN_SOURCE_LANG=auto
+set SCREEN_SOURCE_LANG=zh-CN
+set OCR_LANG=chi_sim
 "D:\AI generated\local_runtime\Python\Python312\python.exe" screen_translator.py
 pause

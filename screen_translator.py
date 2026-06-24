@@ -23,9 +23,10 @@ TESSDATA_DIR = Path(os.environ.get("TESSDATA_DIR", str(BASE_DIR / "tessdata")))
 
 TARGET_LANG = os.environ.get("TARGET_LANG", "vi")
 # auto = let Google detect. You can force zh-CN or ja if needed.
-SCREEN_SOURCE_LANG = os.environ.get("SCREEN_SOURCE_LANG", "auto")
-# Tesseract languages. Use chi_sim for simplified Chinese, chi_tra for traditional Chinese, jpn for Japanese.
-OCR_LANG = os.environ.get("OCR_LANG", "chi_sim+chi_tra+jpn+eng")
+SCREEN_SOURCE_LANG = os.environ.get("SCREEN_SOURCE_LANG", "zh-CN")
+# Tesseract language. Default is Simplified Chinese for Chinese movie subtitles.
+# Other options: chi_tra, jpn, eng, or combinations like chi_sim+eng.
+OCR_LANG = os.environ.get("OCR_LANG", "chi_sim")
 CAPTURE_INTERVAL_MS = int(os.environ.get("CAPTURE_INTERVAL_MS", "300"))
 MIN_TEXT_CHARS = int(os.environ.get("MIN_TEXT_CHARS", "2"))
 SCREEN_HISTORY_WORDS = int(os.environ.get("SCREEN_HISTORY_WORDS", "300"))
@@ -169,7 +170,7 @@ def translate_text(text):
     # languages. This prevents cases where Google returns the Chinese/Japanese
     # OCR text unchanged because language detection failed.
     source_attempts = []
-    for source in (SCREEN_SOURCE_LANG, "auto", "zh-CN", "zh-TW", "ja"):
+    for source in (SCREEN_SOURCE_LANG, "zh-CN", "auto"):
         if source and source not in source_attempts:
             source_attempts.append(source)
 
