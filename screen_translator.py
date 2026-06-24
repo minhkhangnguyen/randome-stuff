@@ -22,6 +22,8 @@ BASE_DIR = Path(__file__).resolve().parent
 TESSDATA_DIR = Path(os.environ.get("TESSDATA_DIR", str(BASE_DIR / "tessdata")))
 
 TARGET_LANG = os.environ.get("TARGET_LANG", "vi")
+# auto = let Google detect. You can force zh-CN or ja if needed.
+SCREEN_SOURCE_LANG = os.environ.get("SCREEN_SOURCE_LANG", "auto")
 # Tesseract languages. Use chi_sim for simplified Chinese, chi_tra for traditional Chinese, jpn for Japanese.
 OCR_LANG = os.environ.get("OCR_LANG", "chi_sim+chi_tra+jpn+eng")
 CAPTURE_INTERVAL_MS = int(os.environ.get("CAPTURE_INTERVAL_MS", "300"))
@@ -135,15 +137,57 @@ def trim_to_word_limit(lines, limit):
         total += wc
     return list(reversed(kept))
 
+
+def cjk_char_count(text):
+    return len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff]", text))
+
+
+def looks_untranslated(source_text, translated_text):
+    translated_text = translated_text.strip()
+    if not translated_text:
+        return True
+
+    source_norm = normalize_for_compare(source_text)
+    translated_norm = normalize_for_compare(translated_text)
+    if source_norm and source_norm == translated_norm:
+        return True
+
+    # If the source is Chinese/Japanese and the result is still mostly CJK,
+    # Google probably did not translate it. Do not show raw Chinese/Japanese
+    # in the Vietnamese subtitle box.
+    cjk = cjk_char_count(translated_text)
+    letters = len(re.findall(r"\S", translated_text))
+    return letters > 0 and cjk >= 3 and (cjk / letters) > 0.35
+
 def translate_text(text):
     if not text.strip():
         return ""
     if GoogleTranslator is None:
         return "deep-translator is not installed. Run pip install -r requirements.txt"
-    try:
-        return GoogleTranslator(source="auto", target=TARGET_LANG).translate(text)
-    except Exception as e:
-        return f"Translate failed: {e}\n\nOCR text:\n{text}"
+
+    # Try the configured source first, then retry likely movie subtitle
+    # languages. This prevents cases where Google returns the Chinese/Japanese
+    # OCR text unchanged because language detection failed.
+    source_attempts = []
+    for source in (SCREEN_SOURCE_LANG, "auto", "zh-CN", "zh-TW", "ja"):
+        if source and source not in source_attempts:
+            source_attempts.append(source)
+
+    last_error = None
+    for source in source_attempts:
+        try:
+            translated = GoogleTranslator(source=source, target=TARGET_LANG).translate(text)
+            if not looks_untranslated(text, translated):
+                return translated
+        except Exception as e:
+            last_error = e
+
+    if last_error:
+        return f"Translate failed: {last_error}"
+
+    # Translation returned the source text every time. Keep the old Vietnamese
+    # subtitle instead of displaying raw Chinese/Japanese.
+    return ""
 
 
 @dataclass
