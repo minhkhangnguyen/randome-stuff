@@ -26,6 +26,7 @@ TARGET_LANG = os.environ.get("TARGET_LANG", "vi")
 OCR_LANG = os.environ.get("OCR_LANG", "chi_sim+chi_tra+jpn+eng")
 CAPTURE_INTERVAL_MS = int(os.environ.get("CAPTURE_INTERVAL_MS", "1200"))
 MIN_TEXT_CHARS = int(os.environ.get("MIN_TEXT_CHARS", "2"))
+SCREEN_HISTORY_WORDS = int(os.environ.get("SCREEN_HISTORY_WORDS", "300"))
 
 
 COMMON_TESSERACT_PATHS = [
@@ -97,6 +98,30 @@ def preprocess_for_ocr(img: Image.Image) -> Image.Image:
     img = img.filter(ImageFilter.SHARPEN)
     return img
 
+
+
+def count_words(text):
+    # Vietnamese/English use spaces. For CJK text without spaces this still
+    # falls back to a rough character count so very long text is trimmed.
+    words = re.findall(r"\S+", text)
+    if len(words) <= 1 and len(text) > 80:
+        return max(1, len(text) // 2)
+    return len(words)
+
+
+def trim_to_word_limit(lines, limit):
+    kept = []
+    total = 0
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        wc = count_words(line)
+        if kept and total + wc > limit:
+            break
+        kept.append(line)
+        total += wc
+    return list(reversed(kept))
 
 def translate_text(text):
     if not text.strip():
@@ -181,7 +206,7 @@ class Overlay(QWidget):
         super().__init__()
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setGeometry(100, 100, 900, 220)
+        self.setGeometry(100, 100, 1040, 360)
 
         self.label = QLabel("Select an area to translate")
         self.label.setFont(QFont("Segoe UI", 15))
@@ -191,7 +216,7 @@ class Overlay(QWidget):
         )
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setWordWrap(True)
-        self.label.setFixedWidth(860)
+        self.label.setFixedWidth(1000)
 
         layout = QVBoxLayout()
         layout.addWidget(self.label)
@@ -215,6 +240,8 @@ class ScreenTranslator(QObject):
         self.signals.result.connect(self.on_result)
         self.signals.error.connect(self.on_error)
         self.last_norm_text = ""
+        self.last_translated_text = ""
+        self.translated_history = []
         self.busy = False
 
         self.timer = QTimer()
@@ -274,7 +301,20 @@ class ScreenTranslator(QObject):
             self.busy = False
 
     def on_result(self, ocr_text, translated):
-        self.overlay.show_text(f"🖼️ {translated}")
+        translated = translated.strip()
+        if not translated:
+            return
+
+        # Keep a rolling reading buffer, similar to the speech translator.
+        # This makes screen text easier to follow when subtitles/dialogue update
+        # quickly, while avoiding an endlessly growing overlay.
+        if translated != self.last_translated_text:
+            self.last_translated_text = translated
+            self.translated_history.append(translated)
+
+        visible_lines = trim_to_word_limit(self.translated_history, SCREEN_HISTORY_WORDS)
+        self.translated_history = visible_lines
+        self.overlay.show_text("🖼️ " + "\n\n".join(visible_lines))
 
     def on_error(self, message):
         self.overlay.show_text(
