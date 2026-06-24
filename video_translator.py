@@ -48,9 +48,12 @@ class AudioTranslator(QObject):
                         segments, _ = self.model.transcribe(audio, language=self.source_lang)
                         text = " ".join([s.text for s in segments]).strip()
                         if text:
-                            translated = argostranslate.translate.translate(
-                                text, self.source_lang, TARGET_LANG)
-                            self.translation_ready.emit(f"🎙️ {translated}")
+                            try:
+                                translated = argostranslate.translate.translate(
+                                    text, self.source_lang, TARGET_LANG)
+                                self.translation_ready.emit(f"🎙️ {translated}")
+                            except Exception as e:
+                                self.translation_ready.emit(f"⚠️ Translation error: {str(e)[:50]}")
 
                     time.sleep(0.5)
         threading.Thread(target=loop, daemon=True).start()
@@ -61,7 +64,7 @@ class SubtitleTranslator(QObject):
     def __init__(self, source_lang):
         super().__init__()
         self.source_lang = source_lang
-        self.sct = mss.mss()
+        self.sct = mss.mss()   # Fixed deprecation
 
     def capture_and_translate(self):
         if OCR_REGION is None:
@@ -72,9 +75,12 @@ class SubtitleTranslator(QObject):
         lang = "chi_sim+eng" if self.source_lang == "zh" else "jpn+eng"
         text = pytesseract.image_to_string(img, lang=lang).strip()
         if text:
-            translated = argostranslate.translate.translate(
-                text, self.source_lang, TARGET_LANG)
-            self.translation_ready.emit(f"📺 {translated}")
+            try:
+                translated = argostranslate.translate.translate(
+                    text, self.source_lang, TARGET_LANG)
+                self.translation_ready.emit(f"📺 {translated}")
+            except Exception as e:
+                self.translation_ready.emit(f"⚠️ OCR Translation error")
 
 class Overlay(QWidget):
     def __init__(self):
@@ -100,7 +106,7 @@ def main():
     overlay = Overlay()
     overlay.show()
 
-    source_lang = "zh"   # Change to "ja" for Japanese
+    source_lang = "zh"
 
     audio = AudioTranslator(source_lang)
     audio.translation_ready.connect(overlay.show_translation)
