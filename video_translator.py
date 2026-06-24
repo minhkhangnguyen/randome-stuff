@@ -75,59 +75,59 @@ class AudioTranslator(QObject):
             min_samples = int(SAMPLE_RATE * MIN_AUDIO_SECONDS)
             
             devices = sd.query_devices()
-            wasapi_devices = []
+            stereo_mix_device = None
             
-            # Find WASAPI devices
+            # Find Stereo Mix device
             for i, dev in enumerate(devices):
-                if dev['hostapi'] == 3 and dev['max_input_channels'] > 0:  # WASAPI = 3
-                    wasapi_devices.append((i, dev))
+                if dev['max_input_channels'] > 0 and 'stereo mix' in dev['name'].lower():
+                    stereo_mix_device = i
+                    break
             
-            print(f"Found {len(wasapi_devices)} WASAPI devices")
+            if stereo_mix_device is None:
+                # Fallback: try any device with "input" in name
+                for i, dev in enumerate(devices):
+                    if dev['max_input_channels'] > 0 and 'input' in dev['name'].lower():
+                        stereo_mix_device = i
+                        break
             
-            success = False
+            if stereo_mix_device is None:
+                print("❌ Could not find Stereo Mix or suitable input device")
+                print("Please enable 'Stereo Mix' in Windows Sound settings")
+                return
             
-            for device_id, dev in wasapi_devices:
-                try:
-                    print(f"Trying WASAPI device {device_id}: {dev['name']}")
+            print(f"🎙️ Using device {stereo_mix_device}: {devices[stereo_mix_device]['name']}")
+            
+            try:
+                with sd.InputStream(
+                    samplerate=SAMPLE_RATE,
+                    channels=2,
+                    callback=self.audio_callback,
+                    blocksize=int(SAMPLE_RATE * 0.1),
+                    device=stereo_mix_device,
+                    dtype='float32'
+                ):
+                    print("✅ Successfully opened Stereo Mix")
                     
-                    with sd.InputStream(
-                        samplerate=SAMPLE_RATE,
-                        channels=2,
-                        callback=self.audio_callback,
-                        blocksize=int(SAMPLE_RATE * 0.1),
-                        device=device_id,
-                        dtype='float32',
-                        extra_settings=sd.WasapiSettings(loopback=True)
-                    ):
-                        print(f"✅ SUCCESS with device {device_id}")
-                        success = True
-                        
-                        while True:
-                            if len(self.buffer) >= min_samples:
-                                audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
+                    while True:
+                        if len(self.buffer) >= min_samples:
+                            audio = np.array(list(self.buffer)[-min_samples:], dtype=np.float32)
+                            
+                            if np.max(np.abs(audio)) > 0.003:
+                                segments, _ = self.model.transcribe(
+                                    audio, 
+                                    language=self.source_lang,
+                                    beam_size=1,
+                                    vad_filter=True
+                                )
+                                text = " ".join([s.text for s in segments]).strip()
                                 
-                                if np.max(np.abs(audio)) > 0.003:
-                                    segments, _ = self.model.transcribe(
-                                        audio, 
-                                        language=self.source_lang,
-                                        beam_size=1,
-                                        vad_filter=True
-                                    )
-                                    text = " ".join([s.text for s in segments]).strip()
-                                    
-                                    if text and len(text) > 1:
-                                        translated = translate_text(text, self.source_lang, TARGET_LANG)
-                                        self.translation_ready.emit(f"🎙️ {translated}")
-                            
-                            time.sleep(0.25)
-                            
-                except Exception as e:
-                    print(f"Failed on device {device_id}: {e}")
-                    continue
-            
-            if not success:
-                print("❌ Could not open any WASAPI loopback device")
-                print("Tip: Try enabling 'Stereo Mix' in Windows Sound settings")
+                                if text and len(text) > 1:
+                                    translated = translate_text(text, self.source_lang, TARGET_LANG)
+                                    self.translation_ready.emit(f"🎙️ {translated}")
+                        
+                        time.sleep(0.25)
+            except Exception as e:
+                print(f"Audio capture error: {e}")
                 
         threading.Thread(target=loop, daemon=True).start()
 
@@ -138,7 +138,7 @@ class Overlay(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setGeometry(100, 100, 650, 140)
 
-        self.label = QLabel("Ready - Capturing system audio (WASAPI)")
+        self.label = QLabel("Ready - Capturing system audio (Stereo Mix)")
         self.label.setFont(QFont("Segoe UI", 14))
         self.label.setStyleSheet("color: #00ffcc; background-color: rgba(0,0,0,200); padding: 15px; border-radius: 8px;")
         self.label.setAlignment(Qt.AlignCenter)
@@ -161,7 +161,7 @@ def main():
     audio.translation_ready.connect(overlay.show_translation)
     audio.start()
 
-    print("✅ Translator running (WASAPI Loopback mode)")
+    print("✅ Translator running (Stereo Mix mode)")
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
