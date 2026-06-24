@@ -24,21 +24,46 @@ SAMPLE_RATE = 16000
 CHUNK_DURATION = 5
 
 def ensure_translation_package(source_lang, target_lang):
-    """Automatically install translation package if missing"""
+    """Install translation package if missing. Falls back to two-step (via English)"""
     try:
         argostranslate.translate.translate("test", source_lang, target_lang)
-    except Exception:
-        print(f"Downloading translation model: {source_lang} → {target_lang} ...")
-        argostranslate.package.update_package_index()
-        available_packages = argostranslate.package.get_available_packages()
-        package = next(
-            (p for p in available_packages 
-             if p.from_code == source_lang and p.to_code == target_lang), None)
-        if package:
-            argostranslate.package.install_from_path(package.download())
-            print(f"✅ {source_lang} → {target_lang} model installed.")
-        else:
-            print(f"⚠️ Could not find package for {source_lang} → {target_lang}")
+        return
+    except:
+        pass
+
+    print(f"Downloading translation model: {source_lang} → {target_lang} ...")
+    argostranslate.package.update_package_index()
+    available = argostranslate.package.get_available_packages()
+
+    # Try direct package
+    package = next((p for p in available if p.from_code == source_lang and p.to_code == target_lang), None)
+    if package:
+        argostranslate.package.install_from_path(package.download())
+        print(f"✅ Direct model installed: {source_lang} → {target_lang}")
+        return
+
+    # Fallback: use English as bridge (zh → en → vi)
+    print("Direct package not found. Using English bridge (zh → en → vi)...")
+    pkg1 = next((p for p in available if p.from_code == source_lang and p.to_code == "en"), None)
+    pkg2 = next((p for p in available if p.from_code == "en" and p.to_code == target_lang), None)
+    
+    if pkg1:
+        argostranslate.package.install_from_path(pkg1.download())
+    if pkg2:
+        argostranslate.package.install_from_path(pkg2.download())
+    print("✅ Bridge models installed (via English)")
+
+def translate_text(text, source_lang, target_lang):
+    """Translate with fallback to English bridge"""
+    try:
+        return argostranslate.translate.translate(text, source_lang, target_lang)
+    except:
+        # Try via English
+        try:
+            en_text = argostranslate.translate.translate(text, source_lang, "en")
+            return argostranslate.translate.translate(en_text, "en", target_lang)
+        except Exception as e:
+            return f"[Translation failed] {text[:40]}"
 
 class AudioTranslator(QObject):
     translation_ready = pyqtSignal(str)
@@ -66,12 +91,8 @@ class AudioTranslator(QObject):
                         segments, _ = self.model.transcribe(audio, language=self.source_lang)
                         text = " ".join([s.text for s in segments]).strip()
                         if text:
-                            try:
-                                translated = argostranslate.translate.translate(
-                                    text, self.source_lang, TARGET_LANG)
-                                self.translation_ready.emit(f"🎙️ {translated}")
-                            except Exception as e:
-                                self.translation_ready.emit(f"⚠️ {str(e)[:60]}")
+                            translated = translate_text(text, self.source_lang, TARGET_LANG)
+                            self.translation_ready.emit(f"🎙️ {translated}")
 
                     time.sleep(0.5)
         threading.Thread(target=loop, daemon=True).start()
@@ -83,7 +104,7 @@ class SubtitleTranslator(QObject):
         super().__init__()
         self.source_lang = source_lang
         ensure_translation_package(source_lang, TARGET_LANG)
-        self.sct = mss.MSS()   # Fixed deprecation
+        self.sct = mss.MSS()
 
     def capture_and_translate(self):
         if OCR_REGION is None:
@@ -94,12 +115,8 @@ class SubtitleTranslator(QObject):
         lang = "chi_sim+eng" if self.source_lang == "zh" else "jpn+eng"
         text = pytesseract.image_to_string(img, lang=lang).strip()
         if text:
-            try:
-                translated = argostranslate.translate.translate(
-                    text, self.source_lang, TARGET_LANG)
-                self.translation_ready.emit(f"📺 {translated}")
-            except Exception as e:
-                self.translation_ready.emit(f"⚠️ {str(e)[:60]}")
+            translated = translate_text(text, self.source_lang, TARGET_LANG)
+            self.translation_ready.emit(f"📺 {translated}")
 
 class Overlay(QWidget):
     def __init__(self):
