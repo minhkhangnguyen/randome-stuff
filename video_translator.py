@@ -14,9 +14,9 @@ from PyQt5.QtGui import QFont
 # ===================== CONFIG =====================
 SOURCE_LANG = "zh"
 TARGET_LANG = "vi"
-WHISPER_MODEL = "base"  # Changed from tiny to base for better accuracy
+WHISPER_MODEL = "base"
 SAMPLE_RATE = 16000
-MIN_AUDIO_SECONDS = 2.5  # Increased from 1.2s to 2.5s for better sentence context
+MIN_AUDIO_SECONDS = 1.0  # Reduced delay so subtitles appear much faster!
 
 def ensure_translation_package(source_lang, target_lang):
     try:
@@ -59,18 +59,14 @@ class AudioTranslator(QObject):
         self.source_lang = source_lang
         ensure_translation_package(source_lang, TARGET_LANG)
         
-        # Use device="auto" to automatically use Nvidia GPU (CUDA) if available (50x faster)
-        # compute_type="default" will auto-select int8 for CPU or float16 for GPU
         self.model = WhisperModel(WHISPER_MODEL, device="auto", compute_type="default")
-        self.buffer = deque(maxlen=int(SAMPLE_RATE * 5)) # Keep last 5 seconds of audio
+        self.audio_buffer = []
+        self.text_history = deque(maxlen=4)  # Stores up to ~100 words of history for context
 
     def start(self):
         def record_loop():
-            # Import soundcard inside the background thread!
             import soundcard as sc
             import warnings
-            
-            # Suppress harmless discontinuity warnings when audio is silent
             warnings.filterwarnings("ignore", message="data discontinuity in recording")
             
             try:
@@ -84,38 +80,57 @@ class AudioTranslator(QObject):
                             mono = np.mean(data, axis=1)
                         else:
                             mono = data.flatten()
-                        self.buffer.extend(mono.astype(np.float32))
+                        self.audio_buffer.extend(mono.astype(np.float32).tolist())
             except Exception as e:
                 print(f"❌ Failed to capture system audio: {e}")
 
         def process_loop():
             min_samples = int(SAMPLE_RATE * MIN_AUDIO_SECONDS)
+            silence_threshold = 0.005
+            
             while True:
-                if len(self.buffer) >= min_samples:
-                    # Grab everything in the buffer (up to 5 seconds) for maximum context
-                    audio = np.array(list(self.buffer), dtype=np.float32)
+                current_len = len(self.audio_buffer)
+                if current_len >= min_samples:
+                    # Take snapshot of current audio
+                    audio = np.array(self.audio_buffer[:current_len], dtype=np.float32)
                     
-                    if np.max(np.abs(audio)) > 0.003:
+                    if np.max(np.abs(audio)) > silence_threshold:
                         segments, _ = self.model.transcribe(
                             audio, 
                             language=self.source_lang,
-                            beam_size=2, # Increased beam size for slightly better accuracy
+                            beam_size=2,
                             vad_filter=True
                         )
-                        text = " ".join([s.text for s in segments]).strip()
+                        current_text = " ".join([s.text for s in segments]).strip()
                         
-                        if text and len(text) > 1:
-                            translated = translate_text(text, self.source_lang, TARGET_LANG)
+                        # Detect if speaker stopped talking (last 0.8s is silence) or block is > 8 seconds
+                        silence_frames = int(SAMPLE_RATE * 0.8)
+                        is_silence = current_len > silence_frames and np.max(np.abs(audio[-silence_frames:])) < silence_threshold
+                        is_too_long = current_len > int(SAMPLE_RATE * 8)
+                        
+                        # ✨ MAGIC HAPPENS HERE ✨
+                        # Combine past 4 sentences + current words to give translator perfect context
+                        history_text = " ".join(list(self.text_history))
+                        full_context = f"{history_text} {current_text}".strip()
+                        
+                        if full_context:
+                            translated = translate_text(full_context, self.source_lang, TARGET_LANG)
                             self.translation_ready.emit(f"🎙️ {translated}")
+                        
+                        if is_silence or is_too_long:
+                            if current_text:
+                                self.text_history.append(current_text) # Lock in confirmed translation
+                            # Clear processed audio to start a new sentence
+                            self.audio_buffer = self.audio_buffer[current_len:]
+                    else:
+                        # Flush silence to prevent memory leaks
+                        if current_len > int(SAMPLE_RATE * 2):
+                            self.audio_buffer = self.audio_buffer[current_len:]
                 
-                # Sleep slightly longer (0.5s instead of 0.25s) to save CPU since we process larger chunks
-                time.sleep(0.5)
+                time.sleep(0.3)
 
         try:
-            # Start background thread to pull audio seamlessly
             threading.Thread(target=record_loop, daemon=True).start()
-            
-            # Start process loop in this thread
             threading.Thread(target=process_loop, daemon=True).start()
         except Exception as e:
             print(f"❌ Failed to start threads: {e}")
@@ -125,12 +140,13 @@ class Overlay(QWidget):
         super().__init__()
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setGeometry(100, 100, 650, 140)
+        self.setGeometry(100, 100, 800, 150) # Made window slightly wider
 
         self.label = QLabel("Ready - Capturing system audio")
-        self.label.setFont(QFont("Segoe UI", 14))
-        self.label.setStyleSheet("color: #00ffcc; background-color: rgba(0,0,0,200); padding: 15px; border-radius: 8px;")
+        self.label.setFont(QFont("Segoe UI", 16))
+        self.label.setStyleSheet("color: #00ffcc; background-color: rgba(0,0,0,200); padding: 20px; border-radius: 10px;")
         self.label.setAlignment(Qt.AlignCenter)
+        self.label.setWordWrap(True) # VERY IMPORTANT: Allows text to wrap multiple lines instead of going off screen
 
         layout = QVBoxLayout()
         layout.addWidget(self.label)
@@ -138,6 +154,7 @@ class Overlay(QWidget):
 
     def show_translation(self, text):
         self.label.setText(text)
+        self.adjustSize() # Auto-grow/shrink the overlay height based on text length
 
 def main():
     app = QApplication(sys.argv)
